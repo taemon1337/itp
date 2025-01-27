@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  itp:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+      - go-mod-cache:/go/pkg/mod
+    environment:
+      - GO_ENV=development
+      - CGO_ENABLED=0
+    command: ["air", "-c", ".air.toml"]
+
+volumes:
+  go-mod-cache:
