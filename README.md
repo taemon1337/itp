@@ -1,79 +1,162 @@
-# ITS - Identity Translation Proxy
+# ITP (Identity Translation Proxy)
 
-The Identity Translation Proxy translated incoming mTLS connections to upstream mTLS connections from a different security domain.
+[![Go Report Card](https://goreportcard.com/badge/github.com/taemon1337/itp)](https://goreportcard.com/report/github.com/taemon1337/itp)
+[![GoDoc](https://godoc.org/github.com/taemon1337/itp?status.svg)](https://godoc.org/github.com/taemon1337/itp)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Architecture | Design
+ITP is a high-performance mTLS proxy that translates identities between different security domains. It enables secure communication between services by handling certificate-based authentication and identity mapping.
 
-- Accept mTLS connections on a specific port
-- Perform a SNI based routing to determine where to proxy the connection
-- Proxy the connection to the upstream server
-- Dynamically select a TLS certificate to use on upstream connections based on the incoming connection TLS client certificate DN
-- Allow routing via DNS, static routing and route pattern
+## Features
 
+- **mTLS Support**: Full mutual TLS authentication for both client and server connections
+- **Identity Translation**: Map certificates between different security domains based on various certificate fields
+- **Flexible Routing**: Multiple routing strategies including DNS-based, static, and pattern-based routing
+- **Dynamic Certificates**: Automatic certificate selection based on client certificate attributes
+- **Real-time Echo Server**: Built-in echo server for debugging TLS connections
+- **High Performance**: Written in Go for optimal performance and minimal resource usage
 
-## ITP Routing
-
-Since the ITP is at its core a proxy, it needs to determine where to proxy incoming connections to.
-
-1. Route via DNS based on SNI (default routing, but depends on DNS)
-2. Static route provided at start up (by `--route <route>` from cli)
-3. Route Pattern (`example.com -> example.cluster.local`)
-
-
-### Route via DNS
-
-In this mode, which is the default routing mode, the ITP will perform a DNS lookup on the SNI of the incoming connection and route the upstream connection to it.  This assumes the incoming SNI will be resolvable by the ITP which is not always the case in an edge proxy.
-
-Since other routing modes route from one domain to another, the destination route will still be looked up in DNS so this method is the defacto default :)
-
-
-### Static Routing
-
-A static route is provided at startup and will only be updated when the ITP is restarted, it also has the highest priority of any routing mode.
+## Installation
 
 ```bash
---route app.cluster.com=app.default.svc.cluster.local
+go install github.com/taemon1337/itp@latest
 ```
 
+Or build from source:
 
-### Route Pattern
-
-A route pattern is a standard way to translate between an incoming SNI and the destination server.
-
-Examples look like this:
 ```bash
-
---route-pattern *.*.cluster.com=*.<namespace>.svc.cluster.local
+git clone https://github.com/taemon1337/itp.git
+cd itp
+make build
 ```
+
+## Quick Start
+
+1. Start the proxy with basic configuration:
+```bash
+itp --listen :8443 \
+    --cert server.crt \
+    --key server.key \
+    --ca ca.crt
+```
+
+2. Add identity mappings:
+```bash
+itp --listen :8443 \
+    --cert server.crt \
+    --key server.key \
+    --ca ca.crt \
+    --map-organization "ExternalOrg=InternalGroup" \
+    --map-common-name "external.user@example.com=internal.user"
+```
+
+## Configuration
+
+### Routing Options
+
+ITP supports three routing modes in order of priority:
+
+1. **Static Routes** (Highest Priority)
+   ```bash
+   --route app.cluster.com=app.default.svc.cluster.local
+   ```
+
+2. **Route Patterns**
+   ```bash
+   --route-pattern "*.*.cluster.com=*.<namespace>.svc.cluster.local"
+   ```
+
+3. **DNS-based Routing** (Default)
+   - Automatically routes based on SNI domain resolution
 
 ### Identity Translation
 
-The main purpose of ITP is to translate incoming mTLS connections to upstream mTLS connections from a different security domain.  Normally this means mapping an externally controller TLS client certificate to an internal identity that can be updated internally on demand for different user group|roles.
+Map certificate fields to internal identities using these options:
 
-The identity translation can be configured based on the following parameters:
+| Field | Command | Example |
+|-------|---------|---------|
+| Common Name | `--map-common-name` | `--map-common-name "external.user=internal.user"` |
+| Organization | `--map-organization` | `--map-organization "ExternalOrg=InternalTeam"` |
+| Org Unit | `--map-organization-unit` | `--map-organization-unit "ExternalOU=cluster-admin"` |
+| Country | `--map-country` | `--map-country "US=USA"` |
+| State | `--map-state` | `--map-state "CA=California"` |
+| Locality | `--map-locality` | `--map-locality "SanFrancisco=SF"` |
 
-- Map Client Certificate Common Name
-- Map Client Certificate Organization
-- Map Client Certificate Country
-- Map Client Certificate State
-- Map Client Certificate Locality
-- Map Client Certificate Organizational Unit
+### TLS Configuration
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--cert` | Server certificate file | Required |
+| `--key` | Server private key file | Required |
+| `--ca` | CA certificate for client verification | Required |
+| `--listen` | Address to listen on | `:8443` |
+| `--verify-client` | Require client certificate | `true` |
+
+## Echo Server
+
+ITP includes a diagnostic echo server that returns detailed TLS connection information:
 
 ```bash
---map-common-name <src-cn>=<identity>
---map-organization <src-organization>=<identity>
---map-country <src-country>=<identity>
---map-state <src-state>=<identity>
---map-locality <src-locality>=<identity>
---map-organization-unit <src-organization-unit>=<identity>
+itp --echo-server --listen :8443
 ```
 
-The internal domain is normally managed by an automated TLS certificate management tool such as Cert-Manager on Kubernetes.  Once a certificate is issued for a particular User (common name) or Group (organization) it can be referenced in the ITP configuration to map to an internal identity.
+Example output:
+```json
+{
+  "remote_addr": "client.example.com:45678",
+  "local_addr": "server.example.com:8443",
+  "tls": {
+    "version": "TLS_1.3",
+    "cipher_suite": "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "server_name": "echo.example.com",
+    "client_cert_provided": true,
+    "client_cert_subject": "CN=client.example.com,O=Example Org"
+  }
+}
+```
 
-Additional group|roles can be added to a certificate by using the Common Name or Organization fields and make its way to upstream services to use for authorization decisions.
+## Development
 
-For example, to map all users in a Organizational Unit to the `cluster-admin` role, the following would be used:
+### Prerequisites
+
+- Go 1.19 or later
+- Make
+
+### Building
 
 ```bash
---map-organization-unit <src-organization-unit>=cluster-admin
+make build      # Build binary
+make test       # Run tests
+make coverage   # Generate coverage report
 ```
+
+### Project Structure
+
+```
+.
+├── cmd/                  # Command-line interface
+├── pkg/                  # Core packages
+│   ├── certstore/       # Certificate management
+│   ├── echo/           # Echo server implementation
+│   ├── identity/       # Identity translation
+│   ├── proxy/          # TLS proxy implementation
+│   ├── router/         # Routing logic
+│   └── tls/            # TLS configuration
+└── examples/            # Usage examples
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- Thanks to all contributors who have helped shape ITP
+- Built with ❤️ using Go's excellent crypto/tls package
