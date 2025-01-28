@@ -121,6 +121,17 @@ The resulting upstream certificate would have:
 - Organization: ["internal-team", "platform-admins", "sre"]
 - OrganizationalUnit: ["cluster-admin", "developer"]
 
+### Inject HTTP headers
+
+The upstream TLS client certificate will contain the internal user's groups and roles; however, many times the upstream service expects the user's groups and roles in HTTP headers.
+
+To inject these headers, ITP supports the following options:
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--add-groups-header-to-upstream <upstream|sni>=<header>` | Inject groups into an HTTP header | `--add-groups-header-to-upstream "app.default.svc.cluster.local=X-Groups"` |
+| `--add-roles-header-to-upstream <upstream|sni>=<header>` | Inject roles into an HTTP header | `--add-roles-header-to-upstream "app.default.svc.cluster.local=X-Roles"` |
+
 ### TLS Configuration
 
 | Option | Description | Default |

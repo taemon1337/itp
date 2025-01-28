@@ -195,7 +195,8 @@ func TestHandleConnection(t *testing.T) {
 			var echoListener net.Listener
 			if tt.echoName != "" {
 				var err error
-				echoCert, err := certStore.GetCertificate(context.Background(), "echo-server")
+				// Generate certificate for echo server using the provided name
+				echoCert, err := certStore.GetCertificate(context.Background(), tt.echoName)
 				require.NoError(t, err)
 
 				// Get root CA from cert store
@@ -213,7 +214,7 @@ func TestHandleConnection(t *testing.T) {
 					ClientCAs:              rootCAs,
 					VerifyPeerCertificate:  nil,
 					InsecureSkipVerify:     true,
-					ServerName:             "echo-server",
+					ServerName:             tt.echoName,
 				}
 
 				// Start echo server with TLS

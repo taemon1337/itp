@@ -293,7 +293,7 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 
 	// If connecting to echo server, use its name for TLS verification
 	if echoName, echoAddr := p.router.GetEchoUpstream(); echoName != "" && destination == echoAddr {
-		upstreamConfig.ServerName = "echo-server"
+		upstreamConfig.ServerName = echoName
 	}
 
 	// Add root CA if using generated store

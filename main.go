@@ -168,8 +168,8 @@ func main() {
 
 	// Start echo server if enabled
 	if *echoName != "" {
-		// Get certificate from store
-		echoServerCert, err := store.GetCertificate(context.Background(), *echoAddr)
+		// Get certificate from store using the provided echo name
+		echoServerCert, err := store.GetCertificate(context.Background(), *echoName)
 		if err != nil {
 			log.Fatalf("Failed to get echo server certificate: %v", err)
 		}
