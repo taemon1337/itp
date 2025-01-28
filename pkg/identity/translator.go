@@ -101,6 +101,22 @@ func (t *Translator) AddGroupMapping(sourceField, sourceValue string, groups []s
 	})
 }
 
+// TranslationError represents an error during identity translation
+type TranslationError struct {
+	Code    string
+	Message string
+}
+
+func (e *TranslationError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+// Common translation error codes
+const (
+	ErrNoMappings         = "NO_IDENTITY_MAPPINGS"
+	ErrUnrecognizedClient = "UNRECOGNIZED_CLIENT"
+)
+
 // TranslateIdentity translates a certificate's identity based on configured mappings
 func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]Identity, error) {
 	// Try to find specific mappings first
@@ -108,12 +124,30 @@ func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]Identity, erro
 
 	// If no mappings found and auto-map is enabled, use the certificate's CN
 	if identity == nil && t.autoMap {
+		if cert.Subject.CommonName == "" {
+			return nil, &TranslationError{
+				Code:    ErrUnrecognizedClient,
+				Message: "client certificate does not contain a Common Name",
+			}
+		}
 		return []Identity{{CommonName: cert.Subject.CommonName}}, nil
 	}
 
-	// If no mappings found and auto-map is disabled, return empty identity
+	// If no mappings found and auto-map is disabled, return error with details
 	if identity == nil {
-		return []Identity{{}}, nil
+		msg := fmt.Sprintf("no identity mappings found for certificate (CN=%s", cert.Subject.CommonName)
+		if len(cert.Subject.Organization) > 0 {
+			msg += fmt.Sprintf(", O=%v", cert.Subject.Organization)
+		}
+		if len(cert.Subject.OrganizationalUnit) > 0 {
+			msg += fmt.Sprintf(", OU=%v", cert.Subject.OrganizationalUnit)
+		}
+		msg += ")"
+		
+		return nil, &TranslationError{
+			Code:    ErrNoMappings,
+			Message: msg,
+		}
 	}
 
 	return []Identity{*identity}, nil
@@ -137,8 +171,6 @@ func (t *Translator) findMappedIdentities(cert *x509.Certificate) *Identity {
 		if mappedOrg, ok := t.orgMappings[org]; ok {
 			identity.Organization = append(identity.Organization, mappedOrg)
 			hasMappings = true
-		} else if t.autoMap {
-			identity.Organization = append(identity.Organization, org)
 		}
 	}
 
@@ -147,8 +179,6 @@ func (t *Translator) findMappedIdentities(cert *x509.Certificate) *Identity {
 		if mappedOU, ok := t.ouMappings[ou]; ok {
 			identity.OrganizationUnit = append(identity.OrganizationUnit, mappedOU)
 			hasMappings = true
-		} else if t.autoMap {
-			identity.OrganizationUnit = append(identity.OrganizationUnit, ou)
 		}
 	}
 

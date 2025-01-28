@@ -1,11 +1,15 @@
 package echo
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"time"
 )
 
@@ -33,6 +37,13 @@ type TLSInfo struct {
 // RouteInfo contains routing details
 type RouteInfo struct {
 	UpstreamName string `json:"upstream_name"`
+	Request      RequestInfo `json:"request"`
+}
+
+type RequestInfo struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Host   string `json:"host"`
 }
 
 // Server represents an echo server that reflects connection information
@@ -129,6 +140,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Read HTTP request
+	log.Printf("Reading request from %s", conn.RemoteAddr())
+	req, err := http.ReadRequest(bufio.NewReader(tlsConn))
+	if err != nil {
+		log.Printf("failed to read request: %v", err)
+		return
+	}
+	log.Printf("Got request: %s %s %s", req.Method, req.URL.Path, req.Host)
+
 	state := tlsConn.ConnectionState()
 
 	info := ConnectionInfo{
@@ -142,6 +162,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		},
 		Route: RouteInfo{
 			UpstreamName: s.name,
+			Request: RequestInfo{
+				Method: req.Method,
+				Path:   req.URL.Path,
+				Host:   req.Host,
+			},
 		},
 	}
 
@@ -155,11 +180,31 @@ func (s *Server) handleConnection(conn net.Conn) {
 		info.TLS.ClientCertNotAfter = cert.NotAfter.Format(time.RFC3339)
 	}
 
-	// Send connection info as pretty-printed JSON
-	encoder := json.NewEncoder(conn)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(info); err != nil {
-		log.Printf("failed to send connection info: %v", err)
+	// Convert info to JSON
+	jsonData, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		log.Printf("failed to marshal connection info: %v", err)
+		return
+	}
+
+	// Create HTTP response
+	resp := &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header: http.Header{
+			"Content-Type":   []string{"application/json"},
+			"Content-Length": []string{fmt.Sprintf("%d", len(jsonData))},
+		},
+		Body:          io.NopCloser(bytes.NewReader(jsonData)),
+		ContentLength: int64(len(jsonData)),
+	}
+
+	// Send response
+	if err := resp.Write(conn); err != nil {
+		log.Printf("failed to send response: %v", err)
 		return
 	}
 }

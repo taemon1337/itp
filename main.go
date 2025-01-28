@@ -35,8 +35,7 @@ func main() {
 
 	// Routing flags
 	routes := flag.String("route", "", "Static routes in format src=dest[,src=dest,...]")
-	routePatterns := flag.String("route-pattern", "", "Route patterns in format src=dest[,src=dest,...]")
-	useDNS := flag.Bool("dns", true, "Use DNS for routing")
+	routeViaDNS := flag.Bool("route-via-dns", false, "Allow routing to unspecified destinations by resolving them via DNS (WARNING: enabling this will attempt to resolve unknown hostnames)")
 
 	// Identity mapping flags
 	cnMappings := flag.String("map-common-name", "", "Common name mappings in format src=identity[,src=identity,...]")
@@ -165,7 +164,7 @@ func main() {
 	}
 
 	// Initialize router
-	r := router.NewRouter(*useDNS)
+	r := router.NewRouter(*routeViaDNS)
 
 	// Start echo server if enabled
 	if *echoName != "" {
@@ -189,11 +188,6 @@ func main() {
 	// Add static routes
 	if *routes != "" {
 		addRoutes(r, *routes)
-	}
-
-	// Add route patterns
-	if *routePatterns != "" {
-		addRoutePatterns(r, *routePatterns)
 	}
 
 	// Create translator
@@ -304,18 +298,6 @@ func addRoutes(r *router.Router, routes string) {
 			continue
 		}
 		r.AddStaticRoute(parts[0], parts[1])
-	}
-}
-
-// addRoutePatterns adds route patterns from a comma-separated string
-func addRoutePatterns(r *router.Router, patterns string) {
-	for _, pattern := range strings.Split(patterns, ",") {
-		parts := strings.Split(pattern, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid route pattern format: %s", pattern)
-			continue
-		}
-		r.AddRoutePattern(parts[0], parts[1])
 	}
 }
 

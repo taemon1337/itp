@@ -53,19 +53,14 @@ itp --listen :8443 \
 
 ### Routing Options
 
-ITP supports three routing modes in order of priority:
+ITP supports two routing modes in order of priority:
 
 1. **Static Routes** (Highest Priority)
    ```bash
    --route app.cluster.com=app.default.svc.cluster.local
    ```
 
-2. **Route Patterns**
-   ```bash
-   --route-pattern "*.*.cluster.com=*.<namespace>.svc.cluster.local"
-   ```
-
-3. **DNS-based Routing** (Default)
+2. **DNS-based Routing** (Default)
    - Automatically routes based on SNI domain resolution
 
 ### Identity Translation

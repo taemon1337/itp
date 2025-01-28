@@ -131,7 +131,10 @@ generate-certs: ## Generate development certificates
 
 .PHONY: echo
 echo: ## Run itp with echo
-	docker run --rm -v $(PWD):/app -w /app -p 8443:8443 $(DOCKER_BUILD_IMAGE) sh -c "./itp --echo echo --server-allow-unknown-client-certs --route "localhost=echo" --map-auto"
+	docker run --rm \
+	-v $(PWD):/app -w /app \
+	-p 8443:8443 $(DOCKER_BUILD_IMAGE) \
+	sh -c "./itp --echo echo --server-allow-unknown-client-certs --route "localhost=echo" --map-auto"
 
 .PHONY: all
 all: clean deps fmt vet lint test build ## Run all tasks (clean, deps, fmt, vet, lint, test, build)

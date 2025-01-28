@@ -3,24 +3,21 @@ package router
 import (
 	"fmt"
 	"net"
-	"strings"
 )
 
 // Router handles destination routing
 type Router struct {
-	useDNS        bool
-	staticRoutes  map[string]string
-	routePatterns map[string]string
-	echoName      string
-	echoAddr      string
+	useDNS       bool
+	staticRoutes map[string]string
+	echoName     string
+	echoAddr     string
 }
 
 // NewRouter creates a new router instance
 func NewRouter(useDNS bool) *Router {
 	return &Router{
-		useDNS:        useDNS,
-		staticRoutes:  make(map[string]string),
-		routePatterns: make(map[string]string),
+		useDNS:       useDNS,
+		staticRoutes: make(map[string]string),
 	}
 }
 
@@ -28,6 +25,11 @@ func NewRouter(useDNS bool) *Router {
 func (r *Router) SetEchoUpstream(name, addr string) {
 	r.echoName = name
 	r.echoAddr = addr
+}
+
+// GetEchoUpstream returns the echo upstream name and address
+func (r *Router) GetEchoUpstream() (string, string) {
+	return r.echoName, r.echoAddr
 }
 
 // ResolveDestination resolves the final destination for a server name
@@ -44,17 +46,6 @@ func (r *Router) ResolveDestination(serverName string) (string, error) {
 			return r.echoAddr, nil
 		}
 		return dest, nil
-	}
-
-	// Check route patterns
-	for pattern, dest := range r.routePatterns {
-		if strings.Contains(serverName, pattern) {
-			// Check if route points to echo upstream
-			if r.echoName != "" && dest == r.echoName {
-				return r.echoAddr, nil
-			}
-			return dest, nil
-		}
 	}
 
 	// Use DNS if enabled
@@ -75,6 +66,7 @@ func (r *Router) ResolveDestination(serverName string) (string, error) {
 			return "", fmt.Errorf("no addresses found for %s", host)
 		}
 
+		// Use first resolved address
 		return net.JoinHostPort(addrs[0], port), nil
 	}
 
@@ -84,9 +76,4 @@ func (r *Router) ResolveDestination(serverName string) (string, error) {
 // AddStaticRoute adds a static route mapping
 func (r *Router) AddStaticRoute(src, dest string) {
 	r.staticRoutes[src] = dest
-}
-
-// AddRoutePattern adds a pattern-based route
-func (r *Router) AddRoutePattern(pattern, dest string) {
-	r.routePatterns[pattern] = dest
 }
