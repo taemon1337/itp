@@ -59,8 +59,6 @@ The identity translation can be configured based on the following parameters:
 - Map Client Certificate Locality
 - Map Client Certificate Organizational Unit
 
-
-
 ```bash
 --map-common-name <src-cn>=<identity>
 --map-organization <src-organization>=<identity>

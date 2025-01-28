@@ -2,7 +2,7 @@
 BINARY_NAME=itp
 DOCKER_IMAGE=itp
 VERSION?=1.0.0
-DOCKER_BUILD_IMAGE=golang:1.21-alpine
+DOCKER_BUILD_IMAGE=golang:1.23-alpine
 DOCKER_LINT_IMAGE=golangci/golangci-lint:v1.55.2
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -20,11 +20,21 @@ clean: ## Clean build artifacts
 
 .PHONY: deps
 deps: ## Download dependencies
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go mod download"
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go mod download"
 
 .PHONY: tidy
 tidy: ## Tidy go modules
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go mod tidy"
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go mod tidy"
 
 .PHONY: fmt
 fmt: ## Run go fmt
@@ -32,15 +42,30 @@ fmt: ## Run go fmt
 
 .PHONY: vet
 vet: ## Run go vet
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go vet ./..."
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go vet ./..."
 
 .PHONY: lint
 lint: ## Run golangci-lint
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_LINT_IMAGE) golangci-lint run --timeout 5m
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_LINT_IMAGE) golangci-lint run --timeout 5m
 
 .PHONY: test
 test: ## Run tests
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go test -v -race -coverprofile=coverage.out ./..."
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -race -coverprofile=coverage.out ./..."
 
 .PHONY: coverage
 coverage: test ## Generate test coverage report
@@ -48,8 +73,12 @@ coverage: test ## Generate test coverage report
 
 .PHONY: build
 build: ## Build binary using Docker
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "\
-		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) -ldflags='-w -s -X main.version=$(VERSION)' ."
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) -ldflags='-w -s -X main.version=$(VERSION)' ."
 
 .PHONY: docker-build
 docker-build: ## Build Docker image

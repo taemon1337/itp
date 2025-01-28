@@ -1,12 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"log"
 	"net"
 
+	"github.com/itp/pkg/certstore"
 	"github.com/itp/pkg/identity"
 	"github.com/itp/pkg/router"
 )
@@ -15,15 +16,15 @@ import (
 type Proxy struct {
 	router       *router.Router
 	translator   *identity.Translator
-	upstreamAddr string
+	certStore    certstore.Store
 }
 
 // New creates a new proxy instance
-func New(router *router.Router, translator *identity.Translator, upstreamAddr string) *Proxy {
+func New(router *router.Router, translator *identity.Translator, store certstore.Store) *Proxy {
 	return &Proxy{
 		router:       router,
 		translator:   translator,
-		upstreamAddr: upstreamAddr,
+		certStore:    store,
 	}
 }
 
@@ -71,7 +72,14 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 
 	destination, err := p.router.ResolveDestination(sni)
 	if err != nil {
-		log.Printf("failed to resolve destination: %v", err)
+		log.Printf("Failed to resolve destination for %s: %v", sni, err)
+		return
+	}
+
+	// Get certificate for upstream connection
+	upstreamCert, err := p.certStore.GetCertificate(context.Background(), destination)
+	if err != nil {
+		log.Printf("Failed to get certificate for %s: %v", destination, err)
 		return
 	}
 
@@ -79,14 +87,14 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 	subject := p.translator.GetSubjectFromIdentity(identities)
 	log.Printf("translated identities: %v for subject: %v", identities, subject)
 
-	// Configure upstream TLS connection
+	// Create TLS config for upstream connection
 	upstreamConfig := &tls.Config{
-		ServerName: destination,
-		// Additional TLS configuration for upstream connection would go here
+		Certificates: []tls.Certificate{*upstreamCert},
+		ServerName:   destination,
 	}
 
-	// Establish TLS connection to upstream server
-	upstreamConn, err := tls.Dial("tcp", p.upstreamAddr, upstreamConfig)
+	// Connect to upstream
+	upstreamConn, err := tls.Dial("tcp", destination, upstreamConfig)
 	if err != nil {
 		log.Printf("failed to connect to upstream: %v", err)
 		return
@@ -95,7 +103,6 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 
 	// Proxy traffic between client and upstream
 	go func() {
-		log.Printf("streaming conn...")
 		io.Copy(conn, upstreamConn)
 	}()
 	io.Copy(upstreamConn, conn)
