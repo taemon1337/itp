@@ -81,61 +81,86 @@ func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]Identity, erro
 
 // findMappedIdentities looks for specific mappings for the certificate
 func (t *Translator) findMappedIdentities(cert *x509.Certificate) []Identity {
-	var identities []Identity
+	identity := Identity{}
+	hasMappings := false
 
 	// Check CN mappings
 	if cn, ok := t.cnMappings[cert.Subject.CommonName]; ok {
-		identities = append(identities, Identity{
-			CommonName: cn,
-		})
+		identity.CommonName = cn
+		hasMappings = true
 	}
 
 	// Check Organization mappings
 	for _, org := range cert.Subject.Organization {
 		if mappedOrg, ok := t.orgMappings[org]; ok {
-			identities = append(identities, Identity{
-				Organization: []string{mappedOrg},
-			})
+			identity.Organization = append(identity.Organization, mappedOrg)
+			hasMappings = true
 		}
 	}
 
 	// Check OU mappings
 	for _, ou := range cert.Subject.OrganizationalUnit {
 		if mappedOU, ok := t.ouMappings[ou]; ok {
-			identities = append(identities, Identity{
-				OrganizationUnit: []string{mappedOU},
-			})
+			identity.OrganizationUnit = append(identity.OrganizationUnit, mappedOU)
+			hasMappings = true
 		}
 	}
 
 	// Check Locality mappings
 	for _, loc := range cert.Subject.Locality {
 		if mappedLoc, ok := t.locMappings[loc]; ok {
-			identities = append(identities, Identity{
-				Locality: []string{mappedLoc},
-			})
+			identity.Locality = append(identity.Locality, mappedLoc)
+			hasMappings = true
 		}
 	}
 
 	// Check Country mappings
 	for _, country := range cert.Subject.Country {
 		if mappedCountry, ok := t.countryMappings[country]; ok {
-			identities = append(identities, Identity{
-				Country: []string{mappedCountry},
-			})
+			identity.Country = append(identity.Country, mappedCountry)
+			hasMappings = true
+		} else if t.autoMap {
+			identity.Country = append(identity.Country, country)
 		}
 	}
 
 	// Check State mappings
 	for _, state := range cert.Subject.Province {
 		if mappedState, ok := t.stateMappings[state]; ok {
-			identities = append(identities, Identity{
-				State: []string{mappedState},
-			})
+			identity.State = append(identity.State, mappedState)
+			hasMappings = true
+		} else if t.autoMap {
+			identity.State = append(identity.State, state)
 		}
 	}
 
-	return identities
+	if !hasMappings {
+		return nil
+	}
+
+	// If we have mappings, also include unmapped fields if autoMap is enabled
+	if t.autoMap {
+		if identity.CommonName == "" {
+			identity.CommonName = cert.Subject.CommonName
+		}
+		if len(identity.Organization) == 0 {
+			identity.Organization = cert.Subject.Organization
+		}
+		if len(identity.OrganizationUnit) == 0 {
+			identity.OrganizationUnit = cert.Subject.OrganizationalUnit
+		}
+		if len(identity.Locality) == 0 {
+			identity.Locality = cert.Subject.Locality
+		}
+		if len(identity.Country) == 0 {
+			identity.Country = cert.Subject.Country
+		}
+		if len(identity.State) == 0 {
+			identity.State = cert.Subject.Province
+		}
+	}
+
+	return []Identity{identity}
 }
 
 // GetSubjectFromIdentity creates a subject string from an identity
@@ -144,43 +169,42 @@ func (t *Translator) GetSubjectFromIdentity(identities []Identity) string {
 		return ""
 	}
 
-	// For now, just use the first identity
-	id := identities[0]
-	subject := ""
+	identity := identities[0]
+	var subject string
 
-	if id.CommonName != "" {
-		subject += fmt.Sprintf("CN=%s", id.CommonName)
+	if identity.CommonName != "" {
+		subject += fmt.Sprintf("CN=%s", identity.CommonName)
 	}
 
-	for _, org := range id.Organization {
+	for _, org := range identity.Organization {
 		if subject != "" {
 			subject += ","
 		}
 		subject += fmt.Sprintf("O=%s", org)
 	}
 
-	for _, ou := range id.OrganizationUnit {
+	for _, ou := range identity.OrganizationUnit {
 		if subject != "" {
 			subject += ","
 		}
 		subject += fmt.Sprintf("OU=%s", ou)
 	}
 
-	for _, loc := range id.Locality {
+	for _, loc := range identity.Locality {
 		if subject != "" {
 			subject += ","
 		}
 		subject += fmt.Sprintf("L=%s", loc)
 	}
 
-	for _, country := range id.Country {
+	for _, country := range identity.Country {
 		if subject != "" {
 			subject += ","
 		}
 		subject += fmt.Sprintf("C=%s", country)
 	}
 
-	for _, state := range id.State {
+	for _, state := range identity.State {
 		if subject != "" {
 			subject += ","
 		}

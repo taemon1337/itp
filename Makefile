@@ -59,17 +59,41 @@ lint: ## Run golangci-lint
 		$(DOCKER_LINT_IMAGE) golangci-lint run --timeout 5m
 
 .PHONY: test
-test: ## Run tests
+test: deps ## Run tests with coverage
 	docker run --rm \
 		-v $(PWD):/app \
 		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
 		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
 		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -race -coverprofile=coverage.out ./..."
+		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -coverprofile=coverage.out -covermode=count ./..."
+
+.PHONY: test-short
+test-short: deps ## Run tests in short mode (skip long tests)
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -short ./..."
+
+.PHONY: test-nocache
+test-nocache: deps ## Run tests without cache
+	docker run --rm \
+		-v $(PWD):/app \
+		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
+		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -count=1 -coverprofile=coverage.out -covermode=count ./..."
 
 .PHONY: coverage
 coverage: test ## Generate test coverage report
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go tool cover -html=coverage.out -o coverage.html"
+	docker run --rm \
+		-v $(PWD):/app \
+		-w /app \
+		$(DOCKER_BUILD_IMAGE) sh -c "go tool cover -html=coverage.out -o coverage.html && go tool cover -func=coverage.out"
+
+.PHONY: test-ci
+test-ci: lint test coverage ## Run all tests and generate coverage report (CI mode)
 
 .PHONY: build
 build: ## Build binary using Docker
@@ -104,6 +128,10 @@ generate-certs: ## Generate development certificates
 		apk add --no-cache openssl && \
 		openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost' && \
 		cp server.crt ca.crt"
+
+.PHONY: echo
+echo: ## Run itp with echo
+	docker run --rm -v $(PWD):/app -w /app -p 8443:8443 $(DOCKER_BUILD_IMAGE) sh -c "./itp --echo echo --server-allow-unknown-client-certs --route "localhost=echo" --map-auto"
 
 .PHONY: all
 all: clean deps fmt vet lint test build ## Run all tasks (clean, deps, fmt, vet, lint, test, build)

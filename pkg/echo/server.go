@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 )
 
 // ConnectionInfo contains details about the TLS connection
@@ -92,15 +93,15 @@ func (s *Server) serve() {
 func getTLSVersion(ver uint16) string {
 	switch ver {
 	case tls.VersionTLS10:
-		return "TLS 1.0"
+		return "TLS_1.0"
 	case tls.VersionTLS11:
-		return "TLS 1.1"
+		return "TLS_1.1"
 	case tls.VersionTLS12:
-		return "TLS 1.2"
+		return "TLS_1.2"
 	case tls.VersionTLS13:
-		return "TLS 1.3"
+		return "TLS_1.3"
 	default:
-		return fmt.Sprintf("Unknown (0x%04x)", ver)
+		return "unknown"
 	}
 }
 
@@ -110,7 +111,7 @@ func getCipherSuiteName(id uint16) string {
 			return suite.Name
 		}
 	}
-	return fmt.Sprintf("Unknown (0x%04x)", id)
+	return "unknown"
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -122,6 +123,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Perform handshake
 	if err := tlsConn.Handshake(); err != nil {
 		log.Printf("TLS handshake failed: %v", err)
 		return
@@ -134,39 +136,30 @@ func (s *Server) handleConnection(conn net.Conn) {
 		LocalAddr:  conn.LocalAddr().String(),
 		TLS: TLSInfo{
 			Version:             getTLSVersion(state.Version),
-			CipherSuite:         getCipherSuiteName(state.CipherSuite),
-			ServerName:          state.ServerName,
+			CipherSuite:        getCipherSuiteName(state.CipherSuite),
+			ServerName:         state.ServerName,
 			NegotiatedProtocol: state.NegotiatedProtocol,
-			ClientCertProvided: len(state.PeerCertificates) > 0,
 		},
 		Route: RouteInfo{
 			UpstreamName: s.name,
 		},
 	}
 
+	// Add client certificate information if provided
 	if len(state.PeerCertificates) > 0 {
 		cert := state.PeerCertificates[0]
+		info.TLS.ClientCertProvided = true
 		info.TLS.ClientCertSubject = cert.Subject.String()
 		info.TLS.ClientCertIssuer = cert.Issuer.String()
-		info.TLS.ClientCertNotBefore = cert.NotBefore.String()
-		info.TLS.ClientCertNotAfter = cert.NotAfter.String()
+		info.TLS.ClientCertNotBefore = cert.NotBefore.Format(time.RFC3339)
+		info.TLS.ClientCertNotAfter = cert.NotAfter.Format(time.RFC3339)
 	}
 
-	log.Printf("Echo server accepted connection from %s", conn.RemoteAddr())
-	if len(state.PeerCertificates) > 0 {
-		cert := state.PeerCertificates[0]
-		log.Printf("Client certificate: Subject=%v", cert.Subject)
-	}
-
-	// Send connection info as JSON
-	response, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		log.Printf("Failed to marshal connection info: %v", err)
+	// Send connection info as pretty-printed JSON
+	encoder := json.NewEncoder(conn)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(info); err != nil {
+		log.Printf("failed to send connection info: %v", err)
 		return
-	}
-	response = append(response, '\n')
-
-	if _, err := conn.Write(response); err != nil {
-		log.Printf("Failed to write response: %v", err)
 	}
 }
