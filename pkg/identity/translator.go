@@ -2,7 +2,6 @@ package identity
 
 import (
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"fmt"
 )
 
@@ -12,107 +11,181 @@ type Mapping struct {
 	Identity    string
 }
 
+// Identity represents a translated identity
+type Identity struct {
+	CommonName       string
+	Organization     []string
+	OrganizationUnit []string
+	Locality         []string
+	Country          []string
+	State            []string
+}
+
 // Translator handles identity translation between certificate domains
 type Translator struct {
-	commonNameMappings   map[string]string
-	organizationMappings map[string]string
-	countryMappings      map[string]string
-	stateMappings        map[string]string
-	localityMappings     map[string]string
-	orgUnitMappings      map[string]string
+	cnMappings      map[string]string
+	ouMappings      map[string]string
+	orgMappings     map[string]string
+	locMappings     map[string]string
+	countryMappings map[string]string
+	stateMappings   map[string]string
+	autoMap         bool
 }
 
 // NewTranslator creates a new identity translator
-func NewTranslator() *Translator {
+func NewTranslator(autoMap bool) *Translator {
 	return &Translator{
-		commonNameMappings:   make(map[string]string),
-		organizationMappings: make(map[string]string),
-		countryMappings:      make(map[string]string),
-		stateMappings:        make(map[string]string),
-		localityMappings:     make(map[string]string),
-		orgUnitMappings:      make(map[string]string),
+		cnMappings:      make(map[string]string),
+		ouMappings:      make(map[string]string),
+		orgMappings:     make(map[string]string),
+		locMappings:     make(map[string]string),
+		countryMappings: make(map[string]string),
+		stateMappings:   make(map[string]string),
+		autoMap:         autoMap,
 	}
 }
 
-// AddMapping adds a mapping for a specific certificate field
-func (t *Translator) AddMapping(field string, sourceValue, identity string) error {
+// AddMapping adds a mapping for a specific field
+func (t *Translator) AddMapping(field, from string, to string) {
 	switch field {
-	case "CN":
-		t.commonNameMappings[sourceValue] = identity
-	case "O":
-		t.organizationMappings[sourceValue] = identity
-	case "C":
-		t.countryMappings[sourceValue] = identity
-	case "ST":
-		t.stateMappings[sourceValue] = identity
-	case "L":
-		t.localityMappings[sourceValue] = identity
-	case "OU":
-		t.orgUnitMappings[sourceValue] = identity
-	default:
-		return fmt.Errorf("unsupported certificate field: %s", field)
+	case "common-name":
+		t.cnMappings[from] = to
+	case "organization":
+		t.orgMappings[from] = to
+	case "organization-unit":
+		t.ouMappings[from] = to
+	case "locality":
+		t.locMappings[from] = to
+	case "country":
+		t.countryMappings[from] = to
+	case "state":
+		t.stateMappings[from] = to
 	}
-	return nil
 }
 
 // TranslateIdentity translates a certificate's identity based on configured mappings
-func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]string, error) {
-	var identities []string
+func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]Identity, error) {
+	// Try to find specific mappings first
+	identities := t.findMappedIdentities(cert)
+	if len(identities) > 0 {
+		return identities, nil
+	}
 
-	// Check Common Name mapping
-	if identity, ok := t.commonNameMappings[cert.Subject.CommonName]; ok {
-		identities = append(identities, identity)
+	// If no mappings found and auto-map is enabled, use the certificate's CN
+	if t.autoMap {
+		return []Identity{{CommonName: cert.Subject.CommonName}}, nil
+	}
+
+	return nil, fmt.Errorf("no identity mappings found for certificate")
+}
+
+// findMappedIdentities looks for specific mappings for the certificate
+func (t *Translator) findMappedIdentities(cert *x509.Certificate) []Identity {
+	var identities []Identity
+
+	// Check CN mappings
+	if cn, ok := t.cnMappings[cert.Subject.CommonName]; ok {
+		identities = append(identities, Identity{
+			CommonName: cn,
+		})
 	}
 
 	// Check Organization mappings
 	for _, org := range cert.Subject.Organization {
-		if identity, ok := t.organizationMappings[org]; ok {
-			identities = append(identities, identity)
+		if mappedOrg, ok := t.orgMappings[org]; ok {
+			identities = append(identities, Identity{
+				Organization: []string{mappedOrg},
+			})
+		}
+	}
+
+	// Check OU mappings
+	for _, ou := range cert.Subject.OrganizationalUnit {
+		if mappedOU, ok := t.ouMappings[ou]; ok {
+			identities = append(identities, Identity{
+				OrganizationUnit: []string{mappedOU},
+			})
+		}
+	}
+
+	// Check Locality mappings
+	for _, loc := range cert.Subject.Locality {
+		if mappedLoc, ok := t.locMappings[loc]; ok {
+			identities = append(identities, Identity{
+				Locality: []string{mappedLoc},
+			})
 		}
 	}
 
 	// Check Country mappings
 	for _, country := range cert.Subject.Country {
-		if identity, ok := t.countryMappings[country]; ok {
-			identities = append(identities, identity)
+		if mappedCountry, ok := t.countryMappings[country]; ok {
+			identities = append(identities, Identity{
+				Country: []string{mappedCountry},
+			})
 		}
 	}
 
 	// Check State mappings
 	for _, state := range cert.Subject.Province {
-		if identity, ok := t.stateMappings[state]; ok {
-			identities = append(identities, identity)
+		if mappedState, ok := t.stateMappings[state]; ok {
+			identities = append(identities, Identity{
+				State: []string{mappedState},
+			})
 		}
 	}
 
-	// Check Locality mappings
-	for _, locality := range cert.Subject.Locality {
-		if identity, ok := t.localityMappings[locality]; ok {
-			identities = append(identities, identity)
-		}
-	}
-
-	// Check OrganizationalUnit mappings
-	for _, ou := range cert.Subject.OrganizationalUnit {
-		if identity, ok := t.orgUnitMappings[ou]; ok {
-			identities = append(identities, identity)
-		}
-	}
-
-	if len(identities) == 0 {
-		return nil, fmt.Errorf("no identity mappings found for certificate")
-	}
-
-	return identities, nil
+	return identities
 }
 
-// GetSubjectFromIdentity returns a pkix.Name for the translated identity
-func (t *Translator) GetSubjectFromIdentity(identities []string) pkix.Name {
-	// For now, we'll use a simple implementation that sets the CN to the first identity
-	// and adds additional identities as OrganizationalUnits
-	subject := pkix.Name{
-		CommonName:         identities[0],
-		OrganizationalUnit: identities[1:],
+// GetSubjectFromIdentity creates a subject string from an identity
+func (t *Translator) GetSubjectFromIdentity(identities []Identity) string {
+	if len(identities) == 0 {
+		return ""
 	}
+
+	// For now, just use the first identity
+	id := identities[0]
+	subject := ""
+
+	if id.CommonName != "" {
+		subject += fmt.Sprintf("CN=%s", id.CommonName)
+	}
+
+	for _, org := range id.Organization {
+		if subject != "" {
+			subject += ","
+		}
+		subject += fmt.Sprintf("O=%s", org)
+	}
+
+	for _, ou := range id.OrganizationUnit {
+		if subject != "" {
+			subject += ","
+		}
+		subject += fmt.Sprintf("OU=%s", ou)
+	}
+
+	for _, loc := range id.Locality {
+		if subject != "" {
+			subject += ","
+		}
+		subject += fmt.Sprintf("L=%s", loc)
+	}
+
+	for _, country := range id.Country {
+		if subject != "" {
+			subject += ","
+		}
+		subject += fmt.Sprintf("C=%s", country)
+	}
+
+	for _, state := range id.State {
+		if subject != "" {
+			subject += ","
+		}
+		subject += fmt.Sprintf("ST=%s", state)
+	}
+
 	return subject
 }

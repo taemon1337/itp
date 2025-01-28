@@ -3,7 +3,7 @@ BINARY_NAME=itp
 DOCKER_IMAGE=itp
 VERSION?=1.0.0
 DOCKER_BUILD_IMAGE=golang:1.23-alpine
-DOCKER_LINT_IMAGE=golangci/golangci-lint:v1.55.2
+DOCKER_LINT_IMAGE=golangci/golangci-lint:v1.63.4
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 SHELL := /bin/bash

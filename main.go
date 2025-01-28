@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -9,10 +11,9 @@ import (
 	"os"
 	"strings"
 	"time"
-	"context"
-	"crypto/tls"
 
 	"github.com/itp/pkg/certstore"
+	"github.com/itp/pkg/echo"
 	"github.com/itp/pkg/identity"
 	"github.com/itp/pkg/proxy"
 	"github.com/itp/pkg/router"
@@ -25,8 +26,12 @@ func main() {
 	certFile := flag.String("server-cert", "auto", "Server certificate file or 'auto' for auto-generated")
 	keyFile := flag.String("server-key", "auto", "Server key file or 'auto' for auto-generated")
 	caFile := flag.String("server-ca", "", "CA certificate file for server cert (only used with auto-generated certs)")
+	allowUnknownClients := flag.Bool("server-allow-unknown-client-certs", false, "Allow client certificates from unknown CAs")
+	mapAuto := flag.Bool("map-auto", false, "Automatically map client CN to upstream CN")
 	addr := flag.String("addr", ":8443", "address for tls proxy server to listen on")
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
+	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
+	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
 
 	// Routing flags
 	routes := flag.String("route", "", "Static routes in format src=dest[,src=dest,...]")
@@ -46,7 +51,7 @@ func main() {
 	// Initialize certificate store
 	var store certstore.Store
 	var serverCert *tls.Certificate
-	
+
 	switch *certStoreType {
 	case "k8s":
 		store = certstore.NewK8sStore(certstore.K8sOptions{
@@ -58,16 +63,16 @@ func main() {
 			Client:    nil,       // TODO: Add k8s client initialization
 		})
 	case "auto":
-		var err error
-		store, err = certstore.NewGeneratedStore(certstore.GeneratedOptions{
-			Options: certstore.Options{
-				CacheDuration: 1 * time.Hour,
-				DefaultTTL:    24 * time.Hour,
-			},
+		s, err := certstore.NewGeneratedStore(certstore.GeneratedOptions{
+			CommonName: "itp",
+			Expiry: 24 * time.Hour,
+			DefaultTTL: 24 * time.Hour,
+			CacheDuration: time.Hour,
 		})
 		if err != nil {
-			log.Fatal("Failed to create auto certificate store:", err)
+			log.Fatalf("Failed to create generated certificate store: %v", err)
 		}
+		store = s
 	default:
 		log.Fatalf("Unknown certificate store type: %s", *certStoreType)
 	}
@@ -123,7 +128,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to load server certificate: %v", err)
 		}
-
 		serverCert = &cert
 	}
 
@@ -133,8 +137,44 @@ func main() {
 		ClientAuth:   tls.RequestClientCert,
 	}
 
+	if !*allowUnknownClients {
+		// Only verify client certs if we're not allowing unknown clients
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		if *caFile != "" {
+			// Load CA cert if provided
+			caCert, err := os.ReadFile(*caFile)
+			if err != nil {
+				log.Fatalf("Failed to read CA cert: %v", err)
+			}
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				log.Fatalf("Failed to parse CA cert")
+			}
+			tlsConfig.ClientCAs = caCertPool
+		}
+	}
+
 	// Initialize router
 	r := router.NewRouter(*useDNS)
+
+	// Start echo server if enabled
+	if *echoName != "" {
+		// Get certificate from store
+		echoServerCert, err := store.GetCertificate(context.Background(), *echoAddr)
+		if err != nil {
+			log.Fatalf("Failed to get echo server certificate: %v", err)
+		}
+
+		echoServer := echo.New(echoServerCert, *echoName)
+		if err := echoServer.Start(*echoAddr); err != nil {
+			log.Fatalf("Failed to start echo server: %v", err)
+		}
+		defer echoServer.Stop()
+		
+		// Configure router to use echo server
+		r.SetEchoUpstream(*echoName, *echoAddr)
+		log.Printf("Echo upstream enabled as '%s' on %s", *echoName, *echoAddr)
+	}
 
 	// Add static routes
 	if *routes != "" {
@@ -146,8 +186,8 @@ func main() {
 		addRoutePatterns(r, *routePatterns)
 	}
 
-	// Initialize identity translator
-	t := identity.NewTranslator()
+	// Create translator
+	t := identity.NewTranslator(*mapAuto)
 
 	// Add identity mappings
 	addMappings(t, "common-name", *cnMappings)
@@ -157,8 +197,8 @@ func main() {
 	addMappings(t, "locality", *localityMappings)
 	addMappings(t, "organization-unit", *ouMappings)
 
-	// Create proxy
-	p := proxy.New(r, t, store)
+	// Create proxy instance
+	p := proxy.New(r, t, store, *allowUnknownClients)
 
 	// Start listener
 	log.Printf("listening on %s", *addr)
@@ -190,9 +230,9 @@ func addMappings(t *identity.Translator, field, mappings string) {
 	for _, mapping := range strings.Split(mappings, ",") {
 		parts := strings.Split(mapping, "=")
 		if len(parts) == 2 {
-			if err := t.AddMapping(field, parts[0], parts[1]); err != nil {
-				log.Printf("Failed to add mapping for %s: %v", field, err)
-			}
+			t.AddMapping(field, parts[0], parts[1])
+		} else {
+			log.Printf("Invalid mapping %s", mapping)
 		}
 	}
 }
@@ -202,6 +242,8 @@ func addRoutes(r *router.Router, routes string) {
 		parts := strings.Split(route, "=")
 		if len(parts) == 2 {
 			r.AddStaticRoute(parts[0], parts[1])
+		} else {
+			log.Printf("Invalid route %s", route)
 		}
 	}
 }

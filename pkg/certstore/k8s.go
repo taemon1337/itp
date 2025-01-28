@@ -16,14 +16,10 @@ import (
 type K8sStore struct {
 	client        kubernetes.Interface
 	namespace     string
+	secretName    string
 	cache         map[string]*cachedCert
 	cacheMu       sync.RWMutex
 	cacheDuration time.Duration
-}
-
-type cachedCert struct {
-	cert      *tls.Certificate
-	expiresAt time.Time
 }
 
 // K8sOptions contains Kubernetes-specific store options

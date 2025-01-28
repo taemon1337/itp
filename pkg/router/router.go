@@ -6,92 +6,87 @@ import (
 	"strings"
 )
 
-// Router handles the routing logic for the proxy
+// Router handles destination routing
 type Router struct {
-	staticRoutes   map[string]string
-	routePatterns  []RoutePattern
-	defaultDNSMode bool
+	useDNS        bool
+	staticRoutes  map[string]string
+	routePatterns map[string]string
+	echoName      string
+	echoAddr      string
 }
 
 // NewRouter creates a new router instance
-func NewRouter(defaultDNSMode bool) *Router {
+func NewRouter(useDNS bool) *Router {
 	return &Router{
-		staticRoutes:   make(map[string]string),
-		routePatterns:  []RoutePattern{},
-		defaultDNSMode: defaultDNSMode,
+		useDNS:        useDNS,
+		staticRoutes:  make(map[string]string),
+		routePatterns: make(map[string]string),
 	}
 }
 
-// AddStaticRoute adds a static route
-func (r *Router) AddStaticRoute(source, destination string) {
-	r.staticRoutes[source] = destination
+// SetEchoUpstream configures the echo upstream with a name and address
+func (r *Router) SetEchoUpstream(name, addr string) {
+	r.echoName = name
+	r.echoAddr = addr
 }
 
-// AddRoutePattern adds a route pattern
-func (r *Router) AddRoutePattern(sourcePattern, destPattern string) {
-	r.routePatterns = append(r.routePatterns, RoutePattern{
-		SourcePattern:      sourcePattern,
-		DestinationPattern: destPattern,
-	})
-}
+// ResolveDestination resolves the final destination for a server name
+func (r *Router) ResolveDestination(serverName string) (string, error) {
+	// Check if destination is the echo upstream
+	if r.echoName != "" && serverName == r.echoName {
+		return r.echoAddr, nil
+	}
 
-// ResolveDestination resolves the destination for a given SNI
-func (r *Router) ResolveDestination(sni string) (string, error) {
-	// Check static routes first (highest priority)
-	if dest, ok := r.staticRoutes[sni]; ok {
+	// Check static routes first
+	if dest, ok := r.staticRoutes[serverName]; ok {
+		// Check if route points to echo upstream
+		if r.echoName != "" && dest == r.echoName {
+			return r.echoAddr, nil
+		}
 		return dest, nil
 	}
 
-	// Check pattern routes
-	for _, pattern := range r.routePatterns {
-		if matched, dest := r.matchPattern(sni, pattern); matched {
+	// Check route patterns
+	for pattern, dest := range r.routePatterns {
+		if strings.Contains(serverName, pattern) {
+			// Check if route points to echo upstream
+			if r.echoName != "" && dest == r.echoName {
+				return r.echoAddr, nil
+			}
 			return dest, nil
 		}
 	}
 
-	// Default to DNS lookup if enabled
-	if r.defaultDNSMode {
-		addrs, err := net.LookupHost(sni)
+	// Use DNS if enabled
+	if r.useDNS {
+		// Try to resolve as hostname:port
+		host, port, err := net.SplitHostPort(serverName)
 		if err != nil {
-			return "", fmt.Errorf("DNS lookup failed for %s: %v", sni, err)
+			// If no port specified, use default HTTPS port
+			host = serverName
+			port = "443"
 		}
-		if len(addrs) > 0 {
-			return addrs[0], nil
+
+		addrs, err := net.LookupHost(host)
+		if err != nil {
+			return "", fmt.Errorf("DNS lookup failed for %s: %w", host, err)
 		}
+		if len(addrs) == 0 {
+			return "", fmt.Errorf("no addresses found for %s", host)
+		}
+
+		return net.JoinHostPort(addrs[0], port), nil
 	}
 
-	return "", fmt.Errorf("no route found for SNI: %s", sni)
+	return "", fmt.Errorf("no route found for %s", serverName)
 }
 
-// matchPattern checks if an SNI matches a route pattern and returns the destination
-func (r *Router) matchPattern(sni string, pattern RoutePattern) (bool, string) {
-	sourceParts := strings.Split(pattern.SourcePattern, ".")
-	sniParts := strings.Split(sni, ".")
+// AddStaticRoute adds a static route mapping
+func (r *Router) AddStaticRoute(src, dest string) {
+	r.staticRoutes[src] = dest
+}
 
-	if len(sourceParts) != len(sniParts) {
-		return false, ""
-	}
-
-	wildcards := make(map[int]string)
-
-	// Check if pattern matches and collect wildcards
-	for i := range sourceParts {
-		if sourceParts[i] == "*" {
-			wildcards[i] = sniParts[i]
-		} else if sourceParts[i] != sniParts[i] {
-			return false, ""
-		}
-	}
-
-	// Replace wildcards in destination pattern
-	destParts := strings.Split(pattern.DestinationPattern, ".")
-	for i, part := range destParts {
-		if part == "*" {
-			if wildcard, ok := wildcards[i]; ok {
-				destParts[i] = wildcard
-			}
-		}
-	}
-
-	return true, strings.Join(destParts, ".")
+// AddRoutePattern adds a pattern-based route
+func (r *Router) AddRoutePattern(pattern, dest string) {
+	r.routePatterns[pattern] = dest
 }

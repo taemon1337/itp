@@ -6,19 +6,11 @@ import (
 	"time"
 )
 
-// Store defines the interface for certificate management
+// Store is the interface for certificate stores
 type Store interface {
-	// GetCertificate returns a TLS certificate for the given server name
-	// It may fetch from cache or generate/fetch a new one if needed
 	GetCertificate(ctx context.Context, serverName string) (*tls.Certificate, error)
-
-	// PutCertificate stores a certificate in the store
 	PutCertificate(ctx context.Context, serverName string, cert *tls.Certificate) error
-
-	// RemoveCertificate removes a certificate from the store
 	RemoveCertificate(ctx context.Context, serverName string) error
-
-	// GetCertificateExpiry returns the expiration time of a certificate
 	GetCertificateExpiry(ctx context.Context, serverName string) (time.Time, error)
 }
 
@@ -29,4 +21,10 @@ type Options struct {
 
 	// DefaultTTL specifies the TTL for newly generated certificates
 	DefaultTTL time.Duration
+}
+
+// cachedCert represents a cached certificate with its expiry time
+type cachedCert struct {
+	cert      *tls.Certificate
+	expiresAt time.Time
 }
