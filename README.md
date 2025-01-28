@@ -70,16 +70,61 @@ ITP supports three routing modes in order of priority:
 
 ### Identity Translation
 
+ITP supports two types of identity translation:
+
+1. **Direct Field Mapping**: Map certificate fields directly to new values
+2. **Conditional Role/Group Injection**: Add roles and groups based on certificate attributes
+
+#### Direct Field Mapping
+
 Map certificate fields to internal identities using these options:
 
 | Field | Command | Example |
 |-------|---------|---------|
 | Common Name | `--map-common-name` | `--map-common-name "external.user=internal.user"` |
 | Organization | `--map-organization` | `--map-organization "ExternalOrg=InternalTeam"` |
-| Org Unit | `--map-organization-unit` | `--map-organization-unit "ExternalOU=cluster-admin"` |
+| Org Unit | `--map-organization-unit` | `--map-organization-unit "ExternalOU=InternalOU"` |
 | Country | `--map-country` | `--map-country "US=USA"` |
 | State | `--map-state` | `--map-state "CA=California"` |
 | Locality | `--map-locality` | `--map-locality "SanFrancisco=SF"` |
+
+#### Conditional Role/Group Injection
+
+Add roles and groups to upstream certificates based on incoming certificate attributes:
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `--add-role-to-cn` | Add roles when CN matches | `--add-role-to-cn "admin@example.com=cluster-admin,developer"` |
+| `--add-role-to-org` | Add roles when Organization matches | `--add-role-to-org "platform-team=operator,deployer"` |
+| `--add-role-to-ou` | Add roles when OU matches | `--add-role-to-ou "engineering=developer,debugger"` |
+| `--add-group-to-cn` | Add groups when CN matches | `--add-group-to-cn "admin@example.com=platform-admins,sre"` |
+| `--add-group-to-org` | Add groups when Organization matches | `--add-group-to-org "platform-team=platform,infra"` |
+| `--add-group-to-ou` | Add groups when OU matches | `--add-group-to-ou "engineering=eng-team,builders"` |
+
+Example using both mapping types:
+```bash
+itp --listen :8443 \
+    --cert server.crt \
+    --key server.key \
+    --ca ca.crt \
+    # Direct field mapping
+    --map-common-name "external.admin=internal.admin" \
+    --map-organization "external-team=internal-team" \
+    # Conditional role/group injection
+    --add-role-to-cn "external.admin=cluster-admin,developer" \
+    --add-group-to-org "external-team=platform-admins,sre"
+```
+
+This configuration would:
+1. Map CN "external.admin" to "internal.admin"
+2. Map Organization "external-team" to "internal-team"
+3. Add roles "cluster-admin" and "developer" when CN is "external.admin"
+4. Add groups "platform-admins" and "sre" when Organization contains "external-team"
+
+The resulting upstream certificate would have:
+- CN: "internal.admin"
+- Organization: ["internal-team", "platform-admins", "sre"]
+- OrganizationalUnit: ["cluster-admin", "developer"]
 
 ### TLS Configuration
 

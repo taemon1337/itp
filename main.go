@@ -46,6 +46,16 @@ func main() {
 	localityMappings := flag.String("map-locality", "", "Locality mappings")
 	ouMappings := flag.String("map-organization-unit", "", "Organizational unit mappings")
 
+	// Conditional role mapping flags
+	rolesToCN := flag.String("add-role-to-cn", "", "Add roles when CN matches, format: cn=role1,role2[;cn=role1,role2,...]")
+	rolesToOrg := flag.String("add-role-to-org", "", "Add roles when Organization matches, format: org=role1,role2[;org=role1,role2,...]")
+	rolesToOU := flag.String("add-role-to-ou", "", "Add roles when OU matches, format: ou=role1,role2[;ou=role1,role2,...]")
+
+	// Conditional group mapping flags
+	groupsToCN := flag.String("add-group-to-cn", "", "Add groups when CN matches, format: cn=group1,group2[;cn=group1,group2,...]")
+	groupsToOrg := flag.String("add-group-to-org", "", "Add groups when Organization matches, format: org=group1,group2[;org=group1,group2,...]")
+	groupsToOU := flag.String("add-group-to-ou", "", "Add groups when OU matches, format: ou=group1,group2[;ou=group1,group2,...]")
+
 	flag.Parse()
 
 	// Initialize certificate store
@@ -187,18 +197,28 @@ func main() {
 	}
 
 	// Create translator
-	t := identity.NewTranslator(*mapAuto)
+	translator := identity.NewTranslator(*mapAuto)
 
 	// Add identity mappings
-	addMappings(t, "common-name", *cnMappings)
-	addMappings(t, "organization", *orgMappings)
-	addMappings(t, "country", *countryMappings)
-	addMappings(t, "state", *stateMappings)
-	addMappings(t, "locality", *localityMappings)
-	addMappings(t, "organization-unit", *ouMappings)
+	addMappings(translator, "common-name", *cnMappings)
+	addMappings(translator, "organization", *orgMappings)
+	addMappings(translator, "organization-unit", *ouMappings)
+	addMappings(translator, "country", *countryMappings)
+	addMappings(translator, "state", *stateMappings)
+	addMappings(translator, "locality", *localityMappings)
+
+	// Add conditional role mappings
+	addRoleMappings(translator, "common-name", *rolesToCN)
+	addRoleMappings(translator, "organization", *rolesToOrg)
+	addRoleMappings(translator, "organization-unit", *rolesToOU)
+
+	// Add conditional group mappings
+	addGroupMappings(translator, "common-name", *groupsToCN)
+	addGroupMappings(translator, "organization", *groupsToOrg)
+	addGroupMappings(translator, "organization-unit", *groupsToOU)
 
 	// Create proxy instance
-	p := proxy.New(r, t, store, *allowUnknownClients)
+	p := proxy.New(r, translator, store, *allowUnknownClients)
 
 	// Start listener
 	log.Printf("listening on %s", *addr)
@@ -229,31 +249,73 @@ func addMappings(t *identity.Translator, field, mappings string) {
 
 	for _, mapping := range strings.Split(mappings, ",") {
 		parts := strings.Split(mapping, "=")
-		if len(parts) == 2 {
-			t.AddMapping(field, parts[0], parts[1])
-		} else {
-			log.Printf("Invalid mapping %s", mapping)
+		if len(parts) != 2 {
+			log.Printf("Invalid mapping format: %s", mapping)
+			continue
 		}
+		t.AddMapping(field, parts[0], parts[1])
 	}
 }
 
+// addRoleMappings adds role mappings from a semicolon-separated string
+func addRoleMappings(t *identity.Translator, field, mappings string) {
+	if mappings == "" {
+		return
+	}
+
+	for _, mapping := range strings.Split(mappings, ";") {
+		parts := strings.Split(mapping, "=")
+		if len(parts) != 2 {
+			log.Printf("Invalid role mapping format: %s", mapping)
+			continue
+		}
+
+		sourceValue := parts[0]
+		roles := strings.Split(parts[1], ",")
+		t.AddRoleMapping(field, sourceValue, roles)
+	}
+}
+
+// addGroupMappings adds group mappings from a semicolon-separated string
+func addGroupMappings(t *identity.Translator, field, mappings string) {
+	if mappings == "" {
+		return
+	}
+
+	for _, mapping := range strings.Split(mappings, ";") {
+		parts := strings.Split(mapping, "=")
+		if len(parts) != 2 {
+			log.Printf("Invalid group mapping format: %s", mapping)
+			continue
+		}
+
+		sourceValue := parts[0]
+		groups := strings.Split(parts[1], ",")
+		t.AddGroupMapping(field, sourceValue, groups)
+	}
+}
+
+// addRoutes adds static routes from a comma-separated string
 func addRoutes(r *router.Router, routes string) {
 	for _, route := range strings.Split(routes, ",") {
 		parts := strings.Split(route, "=")
-		if len(parts) == 2 {
-			r.AddStaticRoute(parts[0], parts[1])
-		} else {
-			log.Printf("Invalid route %s", route)
+		if len(parts) != 2 {
+			log.Printf("Invalid route format: %s", route)
+			continue
 		}
+		r.AddStaticRoute(parts[0], parts[1])
 	}
 }
 
+// addRoutePatterns adds route patterns from a comma-separated string
 func addRoutePatterns(r *router.Router, patterns string) {
 	for _, pattern := range strings.Split(patterns, ",") {
 		parts := strings.Split(pattern, "=")
-		if len(parts) == 2 {
-			r.AddRoutePattern(parts[0], parts[1])
+		if len(parts) != 2 {
+			log.Printf("Invalid route pattern format: %s", pattern)
+			continue
 		}
+		r.AddRoutePattern(parts[0], parts[1])
 	}
 }
 

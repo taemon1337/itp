@@ -123,3 +123,181 @@ func TestGetSubjectFromIdentity(t *testing.T) {
 	assert.Contains(t, subject, "C=US")
 	assert.Contains(t, subject, "ST=CA")
 }
+
+func TestTranslator_ConditionalRoleMappings(t *testing.T) {
+	translator := NewTranslator(false)
+
+	// Add some conditional role mappings
+	translator.AddRoleMapping("common-name", "admin@example.com", []string{"cluster-admin", "developer"})
+	translator.AddRoleMapping("organization", "platform-team", []string{"operator", "deployer"})
+	translator.AddRoleMapping("organization-unit", "engineering", []string{"developer", "debugger"})
+
+	tests := []struct {
+		name           string
+		cert          *x509.Certificate
+		expectedRoles []string
+	}{
+		{
+			name: "CN match should add roles",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName: "admin@example.com",
+				},
+			},
+			expectedRoles: []string{"cluster-admin", "developer"},
+		},
+		{
+			name: "Organization match should add roles",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					Organization: []string{"platform-team", "other-team"},
+				},
+			},
+			expectedRoles: []string{"operator", "deployer"},
+		},
+		{
+			name: "OU match should add roles",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedRoles: []string{"developer", "debugger"},
+		},
+		{
+			name: "Multiple matches should add all roles",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:         "admin@example.com",
+					Organization:      []string{"platform-team"},
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedRoles: []string{"cluster-admin", "developer", "operator", "deployer", "developer", "debugger"},
+		},
+		{
+			name: "No matches should add no roles",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:   "user@example.com",
+					Organization: []string{"other-team"},
+				},
+			},
+			expectedRoles: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			identities, err := translator.TranslateIdentity(tt.cert)
+			assert.NoError(t, err)
+			if tt.expectedRoles == nil {
+				assert.Empty(t, identities[0].OrganizationUnit)
+			} else {
+				assert.ElementsMatch(t, tt.expectedRoles, identities[0].OrganizationUnit)
+			}
+		})
+	}
+}
+
+func TestTranslator_ConditionalGroupMappings(t *testing.T) {
+	translator := NewTranslator(false)
+
+	// Add some conditional group mappings
+	translator.AddGroupMapping("common-name", "admin@example.com", []string{"platform-admins", "sre"})
+	translator.AddGroupMapping("organization", "platform-team", []string{"platform", "infra"})
+	translator.AddGroupMapping("organization-unit", "engineering", []string{"eng-team", "builders"})
+
+	tests := []struct {
+		name            string
+		cert           *x509.Certificate
+		expectedGroups []string
+	}{
+		{
+			name: "CN match should add groups",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName: "admin@example.com",
+				},
+			},
+			expectedGroups: []string{"platform-admins", "sre"},
+		},
+		{
+			name: "Organization match should add groups",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					Organization: []string{"platform-team", "other-team"},
+				},
+			},
+			expectedGroups: []string{"platform", "infra"},
+		},
+		{
+			name: "OU match should add groups",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedGroups: []string{"eng-team", "builders"},
+		},
+		{
+			name: "Multiple matches should add all groups",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:         "admin@example.com",
+					Organization:      []string{"platform-team"},
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedGroups: []string{"platform-admins", "sre", "platform", "infra", "eng-team", "builders"},
+		},
+		{
+			name: "No matches should add no groups",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:   "user@example.com",
+					Organization: []string{"other-team"},
+				},
+			},
+			expectedGroups: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			identities, err := translator.TranslateIdentity(tt.cert)
+			assert.NoError(t, err)
+			if tt.expectedGroups == nil {
+				assert.Empty(t, identities[0].Organization)
+			} else {
+				assert.ElementsMatch(t, tt.expectedGroups, identities[0].Organization)
+			}
+		})
+	}
+}
+
+func TestTranslator_MixedMappings(t *testing.T) {
+	translator := NewTranslator(true)
+
+	// Add regular mappings
+	translator.AddMapping("common-name", "admin@example.com", "internal-admin")
+	translator.AddMapping("organization", "external-team", "internal-team")
+
+	// Add role and group mappings
+	translator.AddRoleMapping("common-name", "admin@example.com", []string{"cluster-admin"})
+	translator.AddGroupMapping("organization", "external-team", []string{"platform"})
+
+	cert := &x509.Certificate{
+		Subject: pkix.Name{
+			CommonName:   "admin@example.com",
+			Organization: []string{"external-team"},
+		},
+	}
+
+	identities, err := translator.TranslateIdentity(cert)
+	assert.NoError(t, err)
+	assert.Equal(t, "internal-admin", identities[0].CommonName)
+	assert.Contains(t, identities[0].Organization, "internal-team")
+	assert.Contains(t, identities[0].Organization, "platform")
+	assert.Contains(t, identities[0].OrganizationUnit, "cluster-admin")
+}
