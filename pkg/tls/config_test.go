@@ -17,10 +17,9 @@ import (
 
 func TestNewTLSConfig(t *testing.T) {
 	// Create a GeneratedStore for test certificates
-	store, err := certstore.NewGeneratedStore(certstore.GeneratedOptions{
+	store, err := certstore.NewGeneratedStore(certstore.StoreOptions{
 		CommonName:    "Test CA",
-		Expiry:       24 * time.Hour,
-		DefaultTTL:   1 * time.Hour,
+		TTL:          24 * time.Hour,
 		CacheDuration: 5 * time.Minute,
 	})
 	assert.NoError(t, err)

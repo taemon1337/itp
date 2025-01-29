@@ -15,32 +15,61 @@ import (
 	"time"
 )
 
+// CertificateOptions contains options for creating a certificate
+type CertificateOptions struct {
+	CommonName    string
+	TTL          time.Duration
+	CacheDuration time.Duration
+	KeyUsage     x509.KeyUsage
+	ExtKeyUsage  []x509.ExtKeyUsage
+	IPAddresses  []net.IP // Optional: IP addresses to include as SANs
+}
+
+// StoreOptions contains options for creating a new certificate store
+type StoreOptions struct {
+	CommonName    string
+	TTL          time.Duration
+	KeyUsage     x509.KeyUsage
+	ExtKeyUsage  []x509.ExtKeyUsage
+	CAKey        *rsa.PrivateKey  // Optional: existing CA private key
+	CACert       *x509.Certificate // Optional: existing CA certificate
+	CacheDuration time.Duration
+}
+
+// DefaultCertificateOptions returns the default options for certificate generation
+func DefaultCertificateOptions() CertificateOptions {
+	return CertificateOptions{
+		CommonName:    "Default CA",
+		TTL:          24 * time.Hour,
+		CacheDuration: time.Hour,
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	}
+}
+
+// DefaultStoreOptions returns the default options for creating a new certificate store
+func DefaultStoreOptions() StoreOptions {
+	return StoreOptions{
+		CommonName:    "Default CA",
+		TTL:          24 * time.Hour,
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		CacheDuration: time.Hour,
+	}
+}
+
 // GeneratedStore is a certificate store that generates certificates on demand
 type GeneratedStore struct {
-	mu          sync.RWMutex
-	certs       map[string]*tls.Certificate
-	ca          *x509.Certificate
-	caKey       *rsa.PrivateKey
-	expiry      time.Duration
-	commonName  string
-	defaultTTL  time.Duration
-	cache       map[string]*tls.Certificate
-	cacheMu     sync.RWMutex
+	mu            sync.RWMutex
+	cache         map[string]*tls.Certificate
+	ca            *x509.Certificate
+	caKey         *rsa.PrivateKey
+	defaultOpts   StoreOptions
 	cacheDuration time.Duration
 }
 
-// GeneratedOptions contains options for the generated certificate store
-type GeneratedOptions struct {
-	CommonName string
-	Expiry     time.Duration
-	DefaultTTL time.Duration
-	CacheDuration time.Duration
-	CAKey      *rsa.PrivateKey  // Optional: existing CA private key
-	CACert     *x509.Certificate // Optional: existing CA certificate
-}
-
 // NewGeneratedStore creates a new store for auto-generated certificates
-func NewGeneratedStore(opts GeneratedOptions) (*GeneratedStore, error) {
+func NewGeneratedStore(opts StoreOptions) (*GeneratedStore, error) {
 	var caKey *rsa.PrivateKey
 	var caCert *x509.Certificate
 	var err error
@@ -56,52 +85,46 @@ func NewGeneratedStore(opts GeneratedOptions) (*GeneratedStore, error) {
 		}
 
 		// Generate CA cert
-		ca := &x509.Certificate{
-			SerialNumber: big.NewInt(1),
-			Subject: pkix.Name{
-				CommonName: opts.CommonName + "-ca",
-			},
-			NotBefore:             time.Now(),
-			NotAfter:              time.Now().Add(opts.Expiry),
-			IsCA:                  true,
-			KeyUsage:             x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-			BasicConstraintsValid: true,
+		serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+		serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate serial number: %v", err)
 		}
 
-		caCertBytes, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+		template := &x509.Certificate{
+			SerialNumber: serialNumber,
+			Subject: pkix.Name{
+				CommonName: opts.CommonName,
+			},
+			NotBefore:             time.Now().Add(-1 * time.Second),
+			NotAfter:              time.Now().Add(opts.TTL),
+			KeyUsage:             x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			BasicConstraintsValid: true,
+			IsCA:                 true,
+			MaxPathLen:           1,
+		}
+
+		caCertDER, err := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create CA certificate: %v", err)
 		}
 
-		caCert, err = x509.ParseCertificate(caCertBytes)
+		caCert, err = x509.ParseCertificate(caCertDER)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse CA certificate: %v", err)
 		}
 	}
 
 	return &GeneratedStore{
-		certs:       make(map[string]*tls.Certificate),
-		ca:          caCert,
-		caKey:       caKey,
-		expiry:      opts.Expiry,
-		commonName:  opts.CommonName,
-		defaultTTL:  opts.DefaultTTL,
-		cache:       make(map[string]*tls.Certificate),
+		cache:         make(map[string]*tls.Certificate),
+		ca:            caCert,
+		caKey:         caKey,
+		defaultOpts:   opts,
 		cacheDuration: opts.CacheDuration,
 	}, nil
 }
 
-// GetCACertificate returns the CA certificate used by this store
-func (s *GeneratedStore) GetCACertificate() *x509.Certificate {
-	return s.ca
-}
-
-// GetCAPrivateKey returns the CA private key used by this store
-func (s *GeneratedStore) GetCAPrivateKey() *rsa.PrivateKey {
-	return s.caKey
-}
-
-func (s *GeneratedStore) generateCertificate(serverName string) (*tls.Certificate, error) {
+func (s *GeneratedStore) generateCertificate(serverName string, opts CertificateOptions) (*tls.Certificate, error) {
 	// Generate key
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -120,10 +143,10 @@ func (s *GeneratedStore) generateCertificate(serverName string) (*tls.Certificat
 		Subject: pkix.Name{
 			CommonName: serverName,
 		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(s.defaultTTL),
-		KeyUsage:             x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:          []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		NotBefore:             time.Now().Add(-1 * time.Second),
+		NotAfter:              time.Now().Add(opts.TTL),
+		KeyUsage:             opts.KeyUsage,
+		ExtKeyUsage:          opts.ExtKeyUsage,
 		BasicConstraintsValid: true,
 	}
 
@@ -156,6 +179,9 @@ func (s *GeneratedStore) generateCertificate(serverName string) (*tls.Certificat
 		)
 	}
 
+	// Add IP addresses from CertificateOptions
+	template.IPAddresses = append(template.IPAddresses, opts.IPAddresses...)
+
 	// Create certificate
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, s.ca, &privKey.PublicKey, s.caKey)
 	if err != nil {
@@ -171,63 +197,51 @@ func (s *GeneratedStore) generateCertificate(serverName string) (*tls.Certificat
 	return cert, nil
 }
 
+// GetCertificate gets or generates a certificate for the given server name
 func (s *GeneratedStore) GetCertificate(ctx context.Context, serverName string) (*tls.Certificate, error) {
-	s.cacheMu.RLock()
-	if cached, ok := s.cache[serverName]; ok {
-		if time.Now().Before(cached.Leaf.NotAfter) {
-			s.cacheMu.RUnlock()
-			return cached, nil
-		}
-	}
-	s.cacheMu.RUnlock()
+	return s.GetCertificateWithOptions(ctx, serverName, DefaultCertificateOptions())
+}
 
+// GetCertificateWithOptions gets or generates a certificate for the given server name with specific options
+func (s *GeneratedStore) GetCertificateWithOptions(ctx context.Context, serverName string, opts CertificateOptions) (*tls.Certificate, error) {
 	s.mu.RLock()
-	cert, ok := s.certs[serverName]
-	s.mu.RUnlock()
-
-	if ok && time.Now().Before(cert.Leaf.NotAfter) {
+	if cert, ok := s.cache[serverName]; ok {
+		s.mu.RUnlock()
 		return cert, nil
 	}
+	s.mu.RUnlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Check again in case another goroutine generated it
-	cert, ok = s.certs[serverName]
-	if ok && time.Now().Before(cert.Leaf.NotAfter) {
+	if cert, ok := s.cache[serverName]; ok {
 		return cert, nil
 	}
 
 	// Generate new certificate
-	cert, err := s.generateCertificate(serverName)
+	cert, err := s.generateCertificate(serverName, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	s.certs[serverName] = cert
-	s.cacheMu.Lock()
+	// Cache the certificate
 	s.cache[serverName] = cert
-	s.cacheMu.Unlock()
+
 	return cert, nil
 }
 
 func (s *GeneratedStore) PutCertificate(ctx context.Context, serverName string, cert *tls.Certificate) error {
 	s.mu.Lock()
-	s.certs[serverName] = cert
-	s.mu.Unlock()
-	s.cacheMu.Lock()
 	s.cache[serverName] = cert
-	s.cacheMu.Unlock()
+	s.mu.Unlock()
 	return nil
 }
 
 func (s *GeneratedStore) RemoveCertificate(ctx context.Context, serverName string) error {
 	s.mu.Lock()
-	delete(s.certs, serverName)
-	s.mu.Unlock()
-	s.cacheMu.Lock()
 	delete(s.cache, serverName)
-	s.cacheMu.Unlock()
+	s.mu.Unlock()
 	return nil
 }
 
@@ -237,4 +251,77 @@ func (s *GeneratedStore) GetCertificateExpiry(ctx context.Context, serverName st
 		return time.Time{}, err
 	}
 	return cert.Leaf.NotAfter, nil
+}
+
+// GetCertPool returns a certificate pool containing the store's CA certificate
+func (s *GeneratedStore) GetCertPool() *x509.CertPool {
+	pool := x509.NewCertPool()
+	pool.AddCert(s.ca)
+	return pool
+}
+
+// GetCACertificate returns the CA certificate used by this store
+func (s *GeneratedStore) GetCACertificate() *x509.Certificate {
+	return s.ca
+}
+
+// GetCAPrivateKey returns the CA private key used by this store
+func (s *GeneratedStore) GetCAPrivateKey() *rsa.PrivateKey {
+	return s.caKey
+}
+
+// TLSClientOptions contains options for creating a TLS client configuration
+type TLSClientOptions struct {
+	ServerName string // Required: server name for certificate verification
+	InsecureSkipVerify bool // Optional: skip certificate verification (not recommended)
+}
+
+// TLSServerOptions contains options for creating a TLS server configuration
+type TLSServerOptions struct {
+	ClientAuth tls.ClientAuthType // Optional: defaults to RequireAndVerifyClientCert
+	ClientCAs  *x509.CertPool    // Optional: custom cert pool for client verification
+}
+
+// GetTLSClientConfig returns a TLS configuration suitable for a client
+func (s *GeneratedStore) GetTLSClientConfig(cert *tls.Certificate, opts TLSClientOptions) *tls.Config {
+	if opts.ServerName == "" {
+		// Use cert's common name as server name if not specified
+		if cert != nil && cert.Leaf != nil {
+			opts.ServerName = cert.Leaf.Subject.CommonName
+		}
+	}
+	
+	config := &tls.Config{
+		RootCAs:            s.GetCertPool(),
+		ServerName:         opts.ServerName,
+		InsecureSkipVerify: opts.InsecureSkipVerify,
+	}
+	
+	if cert != nil {
+		config.Certificates = []tls.Certificate{*cert}
+	}
+	
+	return config
+}
+
+// GetTLSServerConfig returns a TLS configuration suitable for a server
+func (s *GeneratedStore) GetTLSServerConfig(cert *tls.Certificate, opts TLSServerOptions) *tls.Config {
+	if opts.ClientAuth == tls.ClientAuthType(0) {
+		opts.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	
+	config := &tls.Config{
+		ClientCAs:  opts.ClientCAs,
+		ClientAuth: opts.ClientAuth,
+	}
+	
+	if config.ClientCAs == nil {
+		config.ClientCAs = s.GetCertPool()
+	}
+	
+	if cert != nil {
+		config.Certificates = []tls.Certificate{*cert}
+	}
+	
+	return config
 }

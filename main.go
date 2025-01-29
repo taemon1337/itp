@@ -1,22 +1,13 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"flag"
 	"log"
-	"net"
-	"os"
 	"strings"
 	"time"
 
-	"github.com/itp/pkg/certstore"
-	"github.com/itp/pkg/echo"
 	"github.com/itp/pkg/identity"
 	"github.com/itp/pkg/proxy"
-	"github.com/itp/pkg/router"
 )
 
 func main() {
@@ -45,6 +36,14 @@ func main() {
 	localityMappings := flag.String("map-locality", "", "Locality mappings")
 	ouMappings := flag.String("map-organization-unit", "", "Organizational unit mappings")
 
+	// Header injection flags
+	injectHeader := flag.String("inject-header", "", "Inject custom headers, format: upstream=header:template[,upstream=header:template,...]")
+	injectGroups := flag.String("inject-groups", "", "Inject groups header, format: upstream=header[,upstream=header,...]")
+	injectRoles := flag.String("inject-roles", "", "Inject roles header, format: upstream=header[,upstream=header,...]")
+	injectCN := flag.String("inject-cn", "", "Inject CN header, format: upstream=header[,upstream=header,...]")
+	injectOrg := flag.String("inject-org", "", "Inject organization header, format: upstream=header[,upstream=header,...]")
+	injectOU := flag.String("inject-ou", "", "Inject organizational unit header, format: upstream=header[,upstream=header,...]")
+
 	// Conditional role mapping flags
 	rolesToCN := flag.String("add-role-to-cn", "", "Add roles when CN matches, format: cn=role1,role2[;cn=role1,role2,...]")
 	rolesToOrg := flag.String("add-role-to-org", "", "Add roles when Organization matches, format: org=role1,role2[;org=role1,role2,...]")
@@ -57,182 +56,103 @@ func main() {
 
 	flag.Parse()
 
-	// Initialize certificate store
-	var store certstore.Store
-	var serverCert *tls.Certificate
+	// Create proxy configuration
+	config := proxy.Config{
+		// Server TLS config
+		CertFile:          *certFile,
+		KeyFile:           *keyFile,
+		CAFile:           *caFile,
+		AllowUnknownCerts: *allowUnknownClients,
+		ListenAddr:        *addr,
 
-	switch *certStoreType {
-	case "k8s":
-		store = certstore.NewK8sStore(certstore.K8sOptions{
-			Options: certstore.Options{
-				CacheDuration: 1 * time.Hour,
-				DefaultTTL:    24 * time.Hour,
-			},
-			Namespace: "default", // TODO: Add namespace flag if needed
-			Client:    nil,       // TODO: Add k8s client initialization
-		})
-	case "auto":
-		s, err := certstore.NewGeneratedStore(certstore.GeneratedOptions{
-			CommonName: "itp",
-			Expiry: 24 * time.Hour,
-			DefaultTTL: 24 * time.Hour,
-			CacheDuration: time.Hour,
-		})
-		if err != nil {
-			log.Fatalf("Failed to create generated certificate store: %v", err)
-		}
-		store = s
-	default:
-		log.Fatalf("Unknown certificate store type: %s", *certStoreType)
+		// Echo server config
+		EchoName:         *echoName,
+		EchoAddr:         *echoAddr,
+		RouteViaDNS:      *routeViaDNS,
+		AutoMapCN:        *mapAuto,
+
+		// Certificate store config
+		CertStoreType:    *certStoreType,
+		CertStoreTTL:     24 * time.Hour,
+		CertStoreCacheDuration: time.Hour,
+		CertStoreNamespace: "default", // TODO: Add namespace flag if needed
 	}
 
-	// Initialize TLS config
-	if *certFile == "auto" {
-		// Use auto-generated certificates for the server
-		genStore, ok := store.(*certstore.GeneratedStore)
-		if !ok {
-			log.Fatal("Auto server certificates require auto cert-store type")
-		}
-
-		// Load or create CA certificate
-		var caCert *x509.Certificate
-		if *caFile != "" {
-			caBytes, err := os.ReadFile(*caFile)
-			if err != nil {
-				log.Fatalf("Failed to read CA file: %v", err)
-			}
-			block, _ := pem.Decode(caBytes)
-			if block == nil {
-				log.Fatal("Failed to decode CA PEM")
-			}
-			caCert, err = x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				log.Fatalf("Failed to parse CA certificate: %v", err)
-			}
-		} else {
-			caCert = genStore.GetCACertificate()
-		}
-
-		// Save CA certificate if requested
-		if *caFile != "" && !fileExists(*caFile) {
-			caBytes := pem.EncodeToMemory(&pem.Block{
-				Type:  "CERTIFICATE",
-				Bytes: caCert.Raw,
-			})
-			if err := os.WriteFile(*caFile, caBytes, 0644); err != nil {
-				log.Printf("Warning: Failed to save CA certificate to %s: %v", *caFile, err)
-			}
-		}
-
-		// Generate server certificate
-		cert, err := genStore.GetCertificate(context.Background(), "server")
-		if err != nil {
-			log.Fatalf("Failed to generate server certificate: %v", err)
-		}
-		serverCert = cert
-	} else {
-		// Use file-based certificates
-		var err error
-		cert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
-		if err != nil {
-			log.Fatalf("Failed to load server certificate: %v", err)
-		}
-		serverCert = &cert
-	}
-
-	// Create TLS config
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*serverCert},
-		ClientAuth:   tls.RequestClientCert,
-	}
-
-	if !*allowUnknownClients {
-		// Only verify client certs if we're not allowing unknown clients
-		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-		if *caFile != "" {
-			// Load CA cert if provided
-			caCert, err := os.ReadFile(*caFile)
-			if err != nil {
-				log.Fatalf("Failed to read CA cert: %v", err)
-			}
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				log.Fatalf("Failed to parse CA cert")
-			}
-			tlsConfig.ClientCAs = caCertPool
-		}
-	}
-
-	// Initialize router
-	r := router.NewRouter(*routeViaDNS)
-
-	// Start echo server if enabled
-	if *echoName != "" {
-		// Get certificate from store using the provided echo name
-		echoServerCert, err := store.GetCertificate(context.Background(), *echoName)
-		if err != nil {
-			log.Fatalf("Failed to get echo server certificate: %v", err)
-		}
-
-		echoServer := echo.New(echoServerCert, *echoName)
-		if err := echoServer.Start(*echoAddr); err != nil {
-			log.Fatalf("Failed to start echo server: %v", err)
-		}
-		defer echoServer.Stop()
-		
-		// Configure router to use echo server
-		r.SetEchoUpstream(*echoName, *echoAddr)
-		log.Printf("Echo upstream enabled as '%s' on %s", *echoName, *echoAddr)
+	// Initialize proxy
+	p, err := proxy.New(config)
+	if err != nil {
+		log.Fatalf("Failed to create proxy: %v", err)
 	}
 
 	// Add static routes
 	if *routes != "" {
-		addRoutes(r, *routes)
+		p.AddRoutes(*routes)
 	}
-
-	// Create translator
-	translator := identity.NewTranslator(*mapAuto)
 
 	// Add identity mappings
-	addMappings(translator, "common-name", *cnMappings)
-	addMappings(translator, "organization", *orgMappings)
-	addMappings(translator, "organization-unit", *ouMappings)
-	addMappings(translator, "country", *countryMappings)
-	addMappings(translator, "state", *stateMappings)
-	addMappings(translator, "locality", *localityMappings)
-
-	// Add conditional role mappings
-	addRoleMappings(translator, "common-name", *rolesToCN)
-	addRoleMappings(translator, "organization", *rolesToOrg)
-	addRoleMappings(translator, "organization-unit", *rolesToOU)
-
-	// Add conditional group mappings
-	addGroupMappings(translator, "common-name", *groupsToCN)
-	addGroupMappings(translator, "organization", *groupsToOrg)
-	addGroupMappings(translator, "organization-unit", *groupsToOU)
-
-	// Create proxy instance
-	p := proxy.New(r, translator, store, *allowUnknownClients)
-
-	// Start listener
-	log.Printf("listening on %s", *addr)
-	ln, err := net.Listen("tcp", *addr)
-	if err != nil {
-		log.Fatal("Failed to start listener:", err)
+	if *cnMappings != "" {
+		addMappings(p.Translator(), "cn", *cnMappings)
 	}
-	defer ln.Close()
-
-	tlsListener := tls.NewListener(ln, tlsConfig)
-	defer tlsListener.Close()
-
-	for {
-		conn, err := tlsListener.Accept()
-		if err != nil {
-			log.Println("Failed to accept connection:", err)
-			continue
-		}
-		go p.HandleConnection(conn)
+	if *orgMappings != "" {
+		addMappings(p.Translator(), "o", *orgMappings)
 	}
+	if *countryMappings != "" {
+		addMappings(p.Translator(), "c", *countryMappings)
+	}
+	if *stateMappings != "" {
+		addMappings(p.Translator(), "st", *stateMappings)
+	}
+	if *localityMappings != "" {
+		addMappings(p.Translator(), "l", *localityMappings)
+	}
+	if *ouMappings != "" {
+		addMappings(p.Translator(), "ou", *ouMappings)
+	}
+
+	// Add role mappings
+	if *rolesToCN != "" {
+		addRoleMappings(p.Translator(), "cn", *rolesToCN)
+	}
+	if *rolesToOrg != "" {
+		addRoleMappings(p.Translator(), "o", *rolesToOrg)
+	}
+	if *rolesToOU != "" {
+		addRoleMappings(p.Translator(), "ou", *rolesToOU)
+	}
+
+	// Add group mappings
+	if *groupsToCN != "" {
+		addGroupMappings(p.Translator(), "cn", *groupsToCN)
+	}
+	if *groupsToOrg != "" {
+		addGroupMappings(p.Translator(), "o", *groupsToOrg)
+	}
+	if *groupsToOU != "" {
+		addGroupMappings(p.Translator(), "ou", *groupsToOU)
+	}
+
+	// Add header templates
+	if *injectHeader != "" {
+		addCustomHeaders(p, *injectHeader)
+	}
+	if *injectGroups != "" {
+		addCommonHeaders(p, "groups", *injectGroups)
+	}
+	if *injectRoles != "" {
+		addCommonHeaders(p, "roles", *injectRoles)
+	}
+	if *injectCN != "" {
+		addCommonHeaders(p, "cn", *injectCN)
+	}
+	if *injectOrg != "" {
+		addCommonHeaders(p, "org", *injectOrg)
+	}
+	if *injectOU != "" {
+		addCommonHeaders(p, "ou", *injectOU)
+	}
+
+	// Start proxy server
+	log.Fatal(p.ListenAndServe(config))
 }
 
 // addMappings adds identity mappings from a comma-separated string
@@ -263,10 +183,8 @@ func addRoleMappings(t *identity.Translator, field, mappings string) {
 			log.Printf("Invalid role mapping format: %s", mapping)
 			continue
 		}
-
-		sourceValue := parts[0]
 		roles := strings.Split(parts[1], ",")
-		t.AddRoleMapping(field, sourceValue, roles)
+		t.AddRoleMapping(field, parts[0], roles)
 	}
 }
 
@@ -282,26 +200,43 @@ func addGroupMappings(t *identity.Translator, field, mappings string) {
 			log.Printf("Invalid group mapping format: %s", mapping)
 			continue
 		}
-
-		sourceValue := parts[0]
 		groups := strings.Split(parts[1], ",")
-		t.AddGroupMapping(field, sourceValue, groups)
+		t.AddGroupMapping(field, parts[0], groups)
 	}
 }
 
-// addRoutes adds static routes from a comma-separated string
-func addRoutes(r *router.Router, routes string) {
-	for _, route := range strings.Split(routes, ",") {
-		parts := strings.Split(route, "=")
+// addCustomHeaders adds custom header templates from a comma-separated string
+func addCustomHeaders(p *proxy.Proxy, mappings string) {
+	for _, mapping := range strings.Split(mappings, ",") {
+		parts := strings.Split(mapping, "=")
 		if len(parts) != 2 {
-			log.Printf("Invalid route format: %s", route)
+			log.Printf("Invalid header format: %s", mapping)
 			continue
 		}
-		r.AddStaticRoute(parts[0], parts[1])
+
+		headerParts := strings.Split(parts[1], ":")
+		if len(headerParts) != 2 {
+			log.Printf("Invalid header value format: %s", parts[1])
+			continue
+		}
+
+		if err := p.AddHeader(parts[0], headerParts[0], headerParts[1]); err != nil {
+			log.Printf("Failed to add header template: %v", err)
+		}
 	}
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// addCommonHeaders adds common header mappings from a comma-separated string
+func addCommonHeaders(p *proxy.Proxy, headerType string, mappings string) {
+	for _, mapping := range strings.Split(mappings, ",") {
+		parts := strings.Split(mapping, "=")
+		if len(parts) != 2 {
+			log.Printf("Invalid header format: %s", mapping)
+			continue
+		}
+
+		if err := p.AddCommonHeader(headerType, parts[0], parts[1]); err != nil {
+			log.Printf("Failed to add common header: %v", err)
+		}
+	}
 }

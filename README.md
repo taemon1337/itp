@@ -125,12 +125,48 @@ The resulting upstream certificate would have:
 
 The upstream TLS client certificate will contain the internal user's groups and roles; however, many times the upstream service expects the user's groups and roles in HTTP headers.
 
-To inject these headers, ITP supports the following options:
+To inject these headers, ITP supports both flexible templating and shortcuts for common cases:
+
+#### Flexible Header Injection
+Use `--inject-header` for full template control:
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--add-groups-header-to-upstream <upstream|sni>=<header>` | Inject groups into an HTTP header | `--add-groups-header-to-upstream "app.default.svc.cluster.local=X-Groups"` |
-| `--add-roles-header-to-upstream <upstream|sni>=<header>` | Inject roles into an HTTP header | `--add-roles-header-to-upstream "app.default.svc.cluster.local=X-Roles"` |
+| `--inject-header` | Inject custom headers using templates | `--inject-header "app.svc=X-Groups:{{.Groups}},app.svc=X-Custom:static-value"` |
+
+Available template variables:
+- `.CommonName` - Certificate common name
+- `.Organization` - Organization names
+- `.OrganizationalUnit` - Organizational unit names
+- `.Groups` - Group names
+- `.Roles` - Role names
+- `.Country` - Country names
+- `.State` - State names
+- `.Locality` - Locality names
+
+#### Shortcuts for Common Headers
+For common cases, use these simplified flags:
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--inject-groups` | Inject groups into a header | `--inject-groups "app.svc=X-Groups"` |
+| `--inject-roles` | Inject roles into a header | `--inject-roles "app.svc=X-Roles"` |
+| `--inject-cn` | Inject common name into a header | `--inject-cn "app.svc=X-User"` |
+| `--inject-org` | Inject organization into a header | `--inject-org "app.svc=X-Team"` |
+| `--inject-ou` | Inject organizational unit into a header | `--inject-ou "app.svc=X-Department"` |
+
+Example combining both approaches:
+```bash
+itp \
+  --inject-groups "app.svc=X-Groups" \
+  --inject-roles "app.svc=X-Roles" \
+  --inject-header "app.svc=X-Custom:{{.CommonName}}/{{.Organization}}"
+```
+
+This will inject three headers for requests to `app.svc`:
+1. `X-Groups` containing the comma-separated list of groups
+2. `X-Roles` containing the comma-separated list of roles
+3. `X-Custom` containing the common name and organization in a custom format
 
 ### TLS Configuration
 
