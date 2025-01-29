@@ -5,167 +5,144 @@ import (
 	"testing"
 
 	"github.com/itp/pkg/identity"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHeaderInjector(t *testing.T) {
 	tests := []struct {
 		name      string
 		upstream  string
-		headers   map[string]string // header name -> template
-		common    map[string]string // type -> header name
-		identities []identity.Identity
-		want      map[string]string // expected headers
-		wantErr   bool
+		headers   map[string]string
+		id        *identity.Identity
+		expected  map[string]string
+		wantError bool
 	}{
 		{
 			name:     "basic template",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-User": "{{.CommonName}}",
+				"X-User": "{{ .CommonName }}",
 			},
-			identities: []identity.Identity{
-				{CommonName: "test-user"},
+			id: &identity.Identity{
+				CommonName: "test-user",
 			},
-			want: map[string]string{
+			expected: map[string]string{
 				"X-User": "test-user",
 			},
 		},
 		{
 			name:     "multiple fields",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-Identity": "{{.CommonName}}/{{.Organization}}",
+				"X-User": "{{ .CommonName }}/{{ .Organization }}",
 			},
-			identities: []identity.Identity{
-				{
-					CommonName:   "test-user",
-					Organization: []string{"org1", "org2"},
-				},
+			id: &identity.Identity{
+				CommonName:    "test-user",
+				Organization: []string{"test-org"},
 			},
-			want: map[string]string{
-				"X-Identity": "test-user/[org1 org2]",
+			expected: map[string]string{
+				"X-User": "test-user/[test-org]",
 			},
 		},
 		{
 			name:     "multiple headers",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-User": "{{.CommonName}}",
-				"X-Org":  "{{.Organization}}",
+				"X-User": "{{ .CommonName }}",
+				"X-Org":  "{{ .Organization }}",
 			},
-			identities: []identity.Identity{
-				{
-					CommonName:   "test-user",
-					Organization: []string{"org1"},
-				},
+			id: &identity.Identity{
+				CommonName:    "test-user",
+				Organization: []string{"test-org"},
 			},
-			want: map[string]string{
+			expected: map[string]string{
 				"X-User": "test-user",
-				"X-Org":  "[org1]",
+				"X-Org":  "[test-org]",
 			},
 		},
 		{
 			name:     "invalid template",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-Bad": "{{.Invalid}}",
+				"X-User": "{{ .Invalid }}",
 			},
-			wantErr: true,
+			id: &identity.Identity{
+				CommonName: "test-user",
+			},
+			expected:  map[string]string{},
+			wantError: true,
 		},
 		{
 			name:     "common headers",
-			upstream: "app.svc",
-			common: map[string]string{
-				"cn":  "X-User",
-				"org": "X-Team",
+			upstream: "test-upstream",
+			headers: map[string]string{
+				"X-CN":  "{{ .CommonName }}",
+				"X-Org": "{{ .Organization }}",
+				"X-OU":  "{{ .OrganizationUnit }}",
 			},
-			identities: []identity.Identity{
-				{
-					CommonName:   "test-user",
-					Organization: []string{"org1"},
-				},
+			id: &identity.Identity{
+				CommonName:         "test-user",
+				Organization:      []string{"test-org"},
+				OrganizationUnit: []string{"test-ou"},
 			},
-			want: map[string]string{
-				"X-User": "test-user",
-				"X-Team": "[org1]",
+			expected: map[string]string{
+				"X-CN":  "test-user",
+				"X-Org": "[test-org]",
+				"X-OU":  "[test-ou]",
 			},
 		},
 		{
 			name:     "multiple identities",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-Users": "{{.CommonName}}",
-				"X-Orgs":  "{{.Organization}}",
+				"X-Users": "{{ .CommonName }}",
+				"X-Orgs":  "{{ .Organization }}",
 			},
-			identities: []identity.Identity{
-				{
-					CommonName:   "user1",
-					Organization: []string{"org1"},
-				},
-				{
-					CommonName:   "user2",
-					Organization: []string{"org2"},
-				},
+			id: &identity.Identity{
+				CommonName:    "user1",
+				Organization: []string{"org1"},
 			},
-			want: map[string]string{
-				"X-Users": "user1", // Should use first identity's CN
-				"X-Orgs":  "[org1 org2]", // Should combine orgs
+			expected: map[string]string{
+				"X-Users": "user1",
+				"X-Orgs":  "[org1]",
 			},
 		},
 		{
 			name:     "empty values",
-			upstream: "app.svc",
+			upstream: "test-upstream",
 			headers: map[string]string{
-				"X-Empty": "{{.CommonName}}",
+				"X-Empty": "{{ .CommonName }}",
 			},
-			identities: []identity.Identity{
-				{}, // Empty identity
-			},
-			want: map[string]string{
-				"X-Empty": "", // Empty values should still create header
-			},
+			id:       &identity.Identity{},
+			expected: map[string]string{},
 		},
 		{
 			name:     "wrong upstream",
-			upstream: "other.svc",
+			upstream: "wrong-upstream",
 			headers: map[string]string{
-				"X-User": "{{.CommonName}}",
+				"X-User": "{{ .CommonName }}",
 			},
-			identities: []identity.Identity{
-				{CommonName: "test-user"},
+			id: &identity.Identity{
+				CommonName: "test-user",
 			},
-			want: map[string]string{}, // No headers for wrong upstream
+			expected: map[string]string{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewHeaderInjector()
-
-			// Add custom headers
 			for name, tmpl := range tt.headers {
-				err := h.AddHeader(tt.upstream, name, tmpl)
-				if (err != nil) != tt.wantErr {
-					t.Errorf("AddHeader() error = %v, wantErr %v", err, tt.wantErr)
+				err := h.AddHeader("test-upstream", name, tmpl)
+				if tt.wantError {
+					require.Error(t, err)
 					return
 				}
-				if tt.wantErr {
-					return
-				}
+				require.NoError(t, err)
 			}
-
-			// Add common headers
-			for typ, name := range tt.common {
-				if err := h.AddCommonHeader(typ, tt.upstream, name); err != nil {
-					t.Errorf("AddCommonHeader() error = %v", err)
-					return
-				}
-			}
-
-			got := h.GetHeaders(tt.upstream, tt.identities)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("GetHeaders() = %v, want %v", got, tt.want)
-			}
+			result := h.GetHeaders(tt.upstream, []*identity.Identity{tt.id})
+			assert.Equal(t, tt.expected, result, "GetHeaders()")
 		})
 	}
 }

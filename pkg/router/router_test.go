@@ -4,7 +4,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/itp/pkg/logger"
 )
+
+// setupTestLogger creates a logger for testing
+func setupTestLogger() *logger.Logger {
+	return logger.New("router", logger.LevelDebug)
+}
 
 func TestNewRouter(t *testing.T) {
 	tests := []struct {
@@ -23,7 +29,8 @@ func TestNewRouter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewRouter(tt.useDNS)
+			logger := setupTestLogger()
+			r := NewRouter(logger, tt.useDNS)
 			assert.Equal(t, tt.useDNS, r.useDNS)
 			assert.NotNil(t, r.staticRoutes)
 		})
@@ -31,7 +38,8 @@ func TestNewRouter(t *testing.T) {
 }
 
 func TestSetEchoUpstream(t *testing.T) {
-	r := NewRouter(false)
+	logger := setupTestLogger()
+	r := NewRouter(logger, false)
 	r.SetEchoUpstream("echo.test", "localhost:8080")
 	name, addr := r.GetEchoUpstream()
 	assert.Equal(t, "echo.test", name)
@@ -102,7 +110,8 @@ func TestResolveDestination(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewRouter(tt.useDNS)
+			logger := setupTestLogger()
+			r := NewRouter(logger, tt.useDNS)
 			r.SetEchoUpstream(tt.echoName, tt.echoAddr)
 			
 			for src, dest := range tt.staticRoutes {
@@ -150,7 +159,8 @@ func TestAddStaticRoute(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewRouter(false)
+			logger := setupTestLogger()
+			r := NewRouter(logger, false)
 			r.AddStaticRoute(tt.src, tt.dest)
 			assert.Equal(t, tt.expected, r.staticRoutes[tt.src])
 		})

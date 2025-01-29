@@ -1,14 +1,12 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -18,7 +16,9 @@ import (
 	"github.com/itp/pkg/echo"
 	"github.com/itp/pkg/certstore"
 	"github.com/itp/pkg/identity"
+	"github.com/itp/pkg/logger"
 	"github.com/itp/pkg/router"
+	"bufio"
 )
 
 // Proxy handles the connection proxying and identity translation
@@ -29,6 +29,7 @@ type Proxy struct {
 	config            Config
 	allowUnknownCerts bool
 	headerInjector    *HeaderInjector
+	logger           *logger.Logger
 }
 
 // Config represents TLS configuration options for the proxy
@@ -51,6 +52,12 @@ type Config struct {
 	CertStoreTTL     time.Duration
 	CertStoreCacheDuration time.Duration
 	CertStoreNamespace string // Only used for k8s store
+
+	// Logger config
+	ProxyLogger      *logger.Logger
+	RouterLogger     *logger.Logger
+	TranslatorLogger *logger.Logger
+	EchoLogger      *logger.Logger
 }
 
 // New creates a new proxy instance with the given configuration
@@ -61,11 +68,11 @@ func New(config Config) (*Proxy, error) {
 		return nil, fmt.Errorf("failed to create certificate store: %v", err)
 	}
 
-	// Initialize router
-	router := router.NewRouter(config.RouteViaDNS)
+	// Initialize router with logger
+	router := router.NewRouter(config.RouterLogger, config.RouteViaDNS)
 
-	// Initialize translator
-	translator := identity.NewTranslator(config.AutoMapCN)
+	// Initialize translator with logger
+	translator := identity.NewTranslator(config.TranslatorLogger, config.AutoMapCN)
 
 	return &Proxy{
 		router:            router,
@@ -74,6 +81,7 @@ func New(config Config) (*Proxy, error) {
 		config:            config,
 		allowUnknownCerts: config.AllowUnknownCerts,
 		headerInjector:    NewHeaderInjector(),
+		logger:           config.ProxyLogger,
 	}, nil
 }
 
@@ -148,13 +156,13 @@ func (p *Proxy) sendErrorResponse(conn net.Conn, statusCode int, message string)
 	resp.ContentLength = int64(len(message))
 	
 	if err := resp.Write(conn); err != nil {
-		log.Printf("Failed to write error response: %v", err)
+		p.config.ProxyLogger.Error("Failed to write error response: %v", err)
 	}
 }
 
 // handleErrorConnection handles a connection that has encountered an error before proxying started
 func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message string) {
-	log.Printf("Connection error from %s: %s", conn.RemoteAddr(), message)
+	p.config.ProxyLogger.Error("Connection error from %s: %s", conn.RemoteAddr(), message)
 	resp := &http.Response{
 		StatusCode: statusCode,
 		ProtoMajor: 1,
@@ -167,96 +175,16 @@ func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message str
 	resp.ContentLength = int64(len(message))
 	
 	if err := resp.Write(conn); err != nil {
-		log.Printf("Failed to write error response: %v", err)
+		p.config.ProxyLogger.Error("Failed to write error response: %v", err)
 	}
 }
 
-// handleHTTPConnection handles HTTP-specific proxying, including header injection
-func (p *Proxy) handleHTTPConnection(clientConn *tls.Conn, upstreamConn *tls.Conn, identities []identity.Identity, serverName string) error {
-	// Read HTTP request from client
-	req, err := http.ReadRequest(bufio.NewReader(clientConn))
-	if err != nil {
-		return fmt.Errorf("failed to read request: %v", err)
-	}
-	defer req.Body.Close()
-
-	// Create upstream request
-	upstreamReq := &http.Request{
-		Method: req.Method,
-		URL:    req.URL,
-		Header: make(http.Header),
-		Body:   req.Body,
-		Host:   req.Host,
-	}
-
-	// Copy original headers
-	for k, v := range req.Header {
-		upstreamReq.Header[k] = v
-	}
-
-	// Add identity information as headers if available
-	if len(identities) > 0 {
-		id := identities[0]
-		if id.CommonName != "" {
-			upstreamReq.Header.Set("X-Client-CN", id.CommonName)
-		}
-		if len(id.Organization) > 0 {
-			upstreamReq.Header.Set("X-Client-Organization", strings.Join(id.Organization, ","))
-		}
-		if len(id.OrganizationUnit) > 0 {
-			upstreamReq.Header.Set("X-Client-OrganizationUnit", strings.Join(id.OrganizationUnit, ","))
-		}
-		if len(id.Locality) > 0 {
-			upstreamReq.Header.Set("X-Client-Locality", strings.Join(id.Locality, ","))
-		}
-		if len(id.Country) > 0 {
-			upstreamReq.Header.Set("X-Client-Country", strings.Join(id.Country, ","))
-		}
-		if len(id.State) > 0 {
-			upstreamReq.Header.Set("X-Client-State", strings.Join(id.State, ","))
-		}
-	}
-
-	// Add custom headers if configured for this destination
-	destination, err := p.router.ResolveDestination(serverName)
-	if err != nil {
-		return fmt.Errorf("failed to resolve destination: %v", err)
-	}
-	for name, value := range p.headerInjector.GetHeaders(destination, identities) {
-		if value != "" {
-			upstreamReq.Header.Set(name, value)
-		}
-	}
-
-	// Send request to upstream
-	if err := upstreamReq.Write(upstreamConn); err != nil {
-		return fmt.Errorf("failed to write request to upstream: %v", err)
-	}
-
-	// Read response from upstream
-	resp, err := http.ReadResponse(bufio.NewReader(upstreamConn), req)
-	if err != nil {
-		return fmt.Errorf("failed to read response from upstream: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Forward response to client
-	if err := resp.Write(clientConn); err != nil {
-		return fmt.Errorf("failed to write response to client: %v", err)
-	}
-
-	return nil
-}
-
-// HandleConnection manages a proxied connection with identity translation
-func (p *Proxy) HandleConnection(conn net.Conn) {
-	defer conn.Close()
-
+// setupTLSConnection performs the initial TLS handshake and identity translation
+func (p *Proxy) setupTLSConnection(conn net.Conn) (*tls.Conn, []*identity.Identity, string, error) {
 	// Step 1: Validate TLS connection and perform handshake
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
-		p.handleErrorConnection(conn, http.StatusBadRequest, "Connection must be TLS")
-		return
+		return nil, nil, "", fmt.Errorf("connection must be TLS")
 	}
 
 	// Create a custom config that will capture the SNI
@@ -275,97 +203,97 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		if sni != "" {
 			msg = fmt.Sprintf("%s (SNI: %s)", msg, sni)
 		}
-		p.handleErrorConnection(conn, http.StatusBadRequest, msg)
-		return
+		return nil, nil, "", fmt.Errorf(msg)
 	}
 
 	state := tlsConn.ConnectionState()
 	if !state.HandshakeComplete {
 		msg := fmt.Sprintf("TLS handshake not completed (SNI: %s)", sni)
-		p.handleErrorConnection(conn, http.StatusBadRequest, msg)
-		return
+		return nil, nil, "", fmt.Errorf(msg)
 	}
 
 	// If no SNI was provided, use a default based on the connection
 	if state.ServerName == "" {
 		state.ServerName = p.getDefaultSNI(conn)
-		log.Printf("No SNI provided, using default: %s", state.ServerName)
+		p.config.ProxyLogger.Debug("No SNI provided, using default: %s", state.ServerName)
 	}
 
-	// Step 2: Resolve destination
-	destination, err := p.router.ResolveDestination(state.ServerName)
+	// Step 2: Verify client certificate
+	var clientCert *x509.Certificate
+	if len(state.PeerCertificates) > 0 {
+		clientCert = state.PeerCertificates[0]
+		p.config.ProxyLogger.Debug("Using verified client certificate from %s, subject: %s",
+			conn.RemoteAddr(), clientCert.Subject)
+	}
+
+	// Step 3: Translate identity
+	identities, err := p.translator.TranslateIdentity(clientCert)
+	if err != nil {
+		var msg string
+		if translationErr, ok := err.(*identity.TranslationError); ok {
+			switch translationErr.Code {
+			case identity.ErrNoMappings:
+				msg = fmt.Sprintf("Access denied: %s", translationErr.Message)
+			case identity.ErrUnrecognizedClient:
+				msg = fmt.Sprintf("Invalid certificate: %s", translationErr.Message)
+			default:
+				msg = fmt.Sprintf("Identity translation failed: %s", translationErr.Message)
+			}
+		} else {
+			msg = fmt.Sprintf("Identity translation failed: %v", err)
+		}
+		return nil, nil, "", fmt.Errorf(msg)
+	}
+
+	return tlsConn, identities, state.ServerName, nil
+}
+
+// HandleConnection manages a proxied connection with identity translation
+func (p *Proxy) HandleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	// Setup TLS connection and translate identity
+	tlsConn, identities, serverName, err := p.setupTLSConnection(conn)
+	if err != nil {
+		p.handleErrorConnection(conn, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Resolve destination
+	destination, err := p.router.ResolveDestination(serverName)
 	if err != nil {
 		if strings.Contains(err.Error(), "no route found") {
-			p.handleErrorConnection(conn, http.StatusNotFound, fmt.Sprintf("No route found for %s", state.ServerName))
+			p.handleErrorConnection(conn, http.StatusNotFound, fmt.Sprintf("No route found for %s", serverName))
 		} else {
 			p.handleErrorConnection(conn, http.StatusInternalServerError, fmt.Sprintf("Failed to resolve destination: %v", err))
 		}
 		return
 	}
 
-	// Step 3: Validate client certificate
-	var clientCert *x509.Certificate
-	if p.allowUnknownCerts {
-		// When allowing unknown certs, use PeerCertificates directly
-		if len(state.PeerCertificates) == 0 {
-			msg := fmt.Sprintf("No client certificate provided (SNI: %s)", state.ServerName)
-			p.handleErrorConnection(conn, http.StatusUnauthorized, msg)
-			return
-		}
-		clientCert = state.PeerCertificates[0]
-		log.Printf("Using unverified client certificate from %s, subject: %s",
-			conn.RemoteAddr(), clientCert.Subject)
-	} else {
-		// When requiring verified certs, use VerifiedChains
-		if len(state.VerifiedChains) == 0 || len(state.VerifiedChains[0]) == 0 {
-			msg := fmt.Sprintf("No verified client certificate chain (SNI: %s)", state.ServerName)
-			p.handleErrorConnection(conn, http.StatusUnauthorized, msg)
-			return
-		}
-		clientCert = state.VerifiedChains[0][0]
-		log.Printf("Using verified client certificate from %s, subject: %s",
-			conn.RemoteAddr(), clientCert.Subject)
-	}
-
-	// Step 4: Translate identity
-	identities, err := p.translator.TranslateIdentity(clientCert)
-	if err != nil {
-		var msg string
-		var statusCode int
-
-		// Check if it's our custom translation error
-		if translationErr, ok := err.(*identity.TranslationError); ok {
-			switch translationErr.Code {
-			case identity.ErrNoMappings:
-				statusCode = http.StatusForbidden
-				msg = fmt.Sprintf("Access denied: %s", translationErr.Message)
-			case identity.ErrUnrecognizedClient:
-				statusCode = http.StatusUnauthorized
-				msg = fmt.Sprintf("Invalid certificate: %s", translationErr.Message)
-			default:
-				statusCode = http.StatusInternalServerError
-				msg = fmt.Sprintf("Identity translation failed: %s", translationErr.Message)
-			}
-		} else {
-			statusCode = http.StatusInternalServerError
-			msg = fmt.Sprintf("Identity translation failed: %v", err)
-		}
-
-		p.handleErrorConnection(conn, statusCode, msg)
+	// Check if this is an HTTP connection that needs header injection
+	if len(p.headerInjector.GetHeaders(serverName, identities)) > 0 {
+		p.handleHTTPConnection(conn, destination, serverName, identities)
 		return
 	}
 
-	// Step 5: Get certificate for upstream connection
+	// Handle as TCP connection
+	p.handleTCPConnection(conn, tlsConn, destination, identities)
+}
+
+// handleTCPConnection handles direct TCP proxying with TLS termination
+func (p *Proxy) handleTCPConnection(conn net.Conn, tlsConn *tls.Conn, destination string, identities []*identity.Identity) {
+	// Get certificate for upstream connection
 	var upstreamCert *tls.Certificate
-	if len(identities) == 1 && identities[0].CommonName == clientCert.Subject.CommonName {
+	var err error = nil
+	if len(identities) == 1 && identities[0].CommonName == tlsConn.ConnectionState().PeerCertificates[0].Subject.CommonName {
 		// If we're using the auto-mapped identity, get cert by CN
-		cn := clientCert.Subject.CommonName
+		cn := identities[0].CommonName
 		upstreamCert, err = p.certStore.GetCertificate(context.Background(), cn)
 		if err != nil {
 			p.handleErrorConnection(conn, http.StatusInternalServerError, fmt.Sprintf("Failed to get certificate for CN %s: %v", cn, err))
 			return
 		}
-		log.Printf("Using auto-mapped certificate with CN: %s", cn)
+		p.config.ProxyLogger.Debug("Using auto-mapped certificate with CN: %s", cn)
 	} else {
 		upstreamCert, err = p.certStore.GetCertificate(context.Background(), destination)
 		if err != nil {
@@ -374,17 +302,13 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		}
 	}
 
-	// Create subject for upstream connection
-	subject := p.translator.GetSubjectFromIdentity(identities)
-	log.Printf("Translated identities: %v for subject: %v", identities, subject)
-
 	// Extract host from destination for TLS verification
 	host := destination
 	if h, _, err := net.SplitHostPort(destination); err == nil {
 		host = h
 	}
 
-	// Step 6: Create TLS config for upstream connection using cert store
+	// Create TLS config for upstream connection using cert store
 	upstreamConfig := p.certStore.GetTLSClientConfig(upstreamCert, certstore.TLSClientOptions{
 		ServerName: host,
 	})
@@ -394,7 +318,7 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		upstreamConfig.ServerName = echoName
 	}
 
-	// Step 7: All validation passed, now connect to upstream
+	// Connect to upstream
 	upstreamConn, err := tls.Dial("tcp", destination, upstreamConfig)
 	if err != nil {
 		p.handleErrorConnection(conn, http.StatusInternalServerError, fmt.Sprintf("Failed to connect to upstream: %v", err))
@@ -402,11 +326,117 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 	}
 	defer upstreamConn.Close()
 
-	// Step 8: Start proxying data
-	if err := p.handleHTTPConnection(tlsConn, upstreamConn, identities, state.ServerName); err != nil {
-		p.handleErrorConnection(conn, http.StatusBadGateway, err.Error())
+	// Create error channels for both directions
+	errChan := make(chan error, 2)
+
+	// Copy data bidirectionally
+	go func() {
+		_, err := io.Copy(upstreamConn, tlsConn)
+		errChan <- err
+	}()
+	go func() {
+		_, err := io.Copy(tlsConn, upstreamConn)
+		errChan <- err
+	}()
+
+	// Wait for either direction to finish or error
+	err = <-errChan
+	if err != nil && err != io.EOF {
+		p.config.ProxyLogger.Error("Error during TCP proxy: %v", err)
+	}
+}
+
+// handleHTTPConnection handles HTTP-specific proxying, including header injection
+func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverName string, identities []*identity.Identity) {
+	p.config.ProxyLogger.Debug("Starting HTTP connection handling for destination: %s, server: %s", destination, serverName)
+
+	// Get certificate for upstream connection
+	upstreamCert, err := p.certStore.GetCertificate(context.Background(), destination)
+	if err != nil {
+		p.config.ProxyLogger.Error("Failed to get certificate: %v", err)
+		p.handleErrorConnection(conn, http.StatusInternalServerError, fmt.Sprintf("Failed to get certificate for %s: %v", destination, err))
 		return
 	}
+	p.config.ProxyLogger.Debug("Got certificate for %s", destination)
+
+	// Extract host from destination for TLS verification
+	host := destination
+	if h, _, err := net.SplitHostPort(destination); err == nil {
+		host = h
+	}
+	p.config.ProxyLogger.Debug("Using host %s for TLS verification", host)
+
+	// Create TLS config for upstream connection
+	upstreamConfig := p.certStore.GetTLSClientConfig(upstreamCert, certstore.TLSClientOptions{
+		ServerName: host,
+	})
+
+	// If connecting to echo server, use its name for TLS verification
+	if echoName, echoAddr := p.router.GetEchoUpstream(); echoName != "" && destination == echoAddr {
+		upstreamConfig.ServerName = echoName
+		p.config.ProxyLogger.Debug("Using echo server name %s for TLS verification", echoName)
+	}
+
+	// Create buffered reader for the connection
+	reader := bufio.NewReader(conn)
+
+	// Read the HTTP request
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		p.config.ProxyLogger.Error("Failed to read request: %v", err)
+		return
+	}
+
+	p.config.ProxyLogger.Debug("Received request: %s %s", req.Method, req.URL.String())
+
+	// Update request URL with destination
+	req.URL.Scheme = "https"
+	req.URL.Host = destination
+	req.Host = destination
+
+	// Add headers from injector for the server name
+	headers := p.headerInjector.GetHeaders(serverName, identities)
+	p.config.ProxyLogger.Debug("Got %d headers to inject for server %q", len(headers), serverName)
+	for k, v := range headers {
+		p.config.ProxyLogger.Debug("Injecting header %q = %q", k, v)
+		req.Header.Set(k, v)
+	}
+
+	// Log final request headers
+	p.config.ProxyLogger.Debug("Final request headers:")
+	for k, v := range req.Header {
+		p.config.ProxyLogger.Debug("  %s: %v", k, v)
+	}
+
+	// Create transport for upstream connection
+	transport := &http.Transport{
+		TLSClientConfig: upstreamConfig,
+		DisableKeepAlives: true,
+	}
+
+	// Send the request to the upstream server
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		p.config.ProxyLogger.Error("Failed to send request: %v", err)
+		p.handleErrorConnection(conn, http.StatusBadGateway, fmt.Sprintf("Failed to send request: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	p.config.ProxyLogger.Debug("Got response: %d %s", resp.StatusCode, resp.Status)
+	p.config.ProxyLogger.Debug("Response headers:")
+	for k, v := range resp.Header {
+		p.config.ProxyLogger.Debug("  %s: %v", k, v)
+	}
+
+	// Write the response back to the client
+	resp.Header.Set("Connection", "close")
+	if err := resp.Write(conn); err != nil {
+		p.config.ProxyLogger.Error("Failed to write response: %v", err)
+		return
+	}
+
+	p.config.ProxyLogger.Debug("Successfully sent response")
 }
 
 // ListenAndServe starts the TLS proxy server
@@ -434,12 +464,12 @@ func (p *Proxy) ListenAndServe(config Config) error {
 	tlsListener := tls.NewListener(ln, tlsConfig)
 	defer tlsListener.Close()
 
-	log.Printf("listening on %s", config.ListenAddr)
+	p.config.ProxyLogger.Info("listening on %s", config.ListenAddr)
 
 	for {
 		conn, err := tlsListener.Accept()
 		if err != nil {
-			log.Println("Failed to accept connection:", err)
+			p.config.ProxyLogger.Error("Failed to accept connection: %v", err)
 			continue
 		}
 		go p.HandleConnection(conn)
@@ -454,14 +484,14 @@ func (p *Proxy) setupEchoServer(config Config) error {
 		return fmt.Errorf("failed to get echo server certificate: %v", err)
 	}
 
-	echoServer := echo.New(echoServerCert, config.EchoName)
+	echoServer := echo.New(echoServerCert, p.certStore.GetCertPool(), config.EchoName)
 	if err := echoServer.Start(config.EchoAddr); err != nil {
 		return fmt.Errorf("failed to start echo server: %v", err)
 	}
 
 	// Configure router to use echo server
 	p.router.SetEchoUpstream(config.EchoName, config.EchoAddr)
-	log.Printf("Echo upstream enabled as '%s' on %s", config.EchoName, config.EchoAddr)
+	p.config.ProxyLogger.Info("Echo upstream enabled as '%s' on %s", config.EchoName, config.EchoAddr)
 
 	return nil
 }
@@ -504,7 +534,7 @@ func (p *Proxy) createTLSConfig(config Config) (*tls.Config, error) {
 					Bytes: caCert.Raw,
 				})
 				if err := os.WriteFile(config.CAFile, caBytes, 0644); err != nil {
-					log.Printf("Warning: Failed to save CA certificate to %s: %v", config.CAFile, err)
+					p.config.ProxyLogger.Warn("Failed to save CA certificate to %s: %v", config.CAFile, err)
 				}
 			}
 		}
@@ -565,7 +595,7 @@ func (p *Proxy) AddRoutes(routes string) {
 	for _, route := range strings.Split(routes, ",") {
 		parts := strings.Split(route, "=")
 		if len(parts) != 2 {
-			log.Printf("Invalid route format: %s", route)
+			p.config.ProxyLogger.Error("Invalid route format: %s", route)
 			continue
 		}
 		p.AddStaticRoute(parts[0], parts[1])

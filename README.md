@@ -65,12 +65,19 @@ ITP supports two routing modes in order of priority:
 
 ### Identity Translation
 
-ITP supports two types of identity translation:
+ITP provides a powerful identity translation system that works in two phases:
 
-1. **Direct Field Mapping**: Map certificate fields directly to new values
-2. **Conditional Role/Group Injection**: Add roles and groups based on certificate attributes
+1. **Basic Identity Translation** (Phase 1)
+   - When a client connects with a TLS certificate, ITP can either:
+     a) Use explicit mappings to translate certificate fields to new values (using `--map-*` flags)
+     b) Auto-map the certificate fields as-is when `--map-auto` is enabled and no explicit mappings exist
+   
+2. **Role and Group Enhancement** (Phase 2)
+   - After the basic translation, ITP can add roles and groups based on the *translated* certificate fields
+   - This happens through conditional mapping flags (`--add-role-to-*` and `--add-group-to-*`)
+   - The conditions are evaluated against the original certificate values
 
-#### Direct Field Mapping
+#### Direct Field Mapping (Phase 1)
 
 Map certificate fields to internal identities using these options:
 
@@ -83,7 +90,11 @@ Map certificate fields to internal identities using these options:
 | State | `--map-state` | `--map-state "CA=California"` |
 | Locality | `--map-locality` | `--map-locality "SanFrancisco=SF"` |
 
-#### Conditional Role/Group Injection
+Auto-mapping can be enabled with `--map-auto`. When enabled and no explicit mappings match:
+- All certificate fields are copied as-is to the internal certificate
+- For example, if external cert has CN="user1", the internal cert will also have CN="user1"
+
+#### Conditional Role/Group Injection (Phase 2)
 
 Add roles and groups to upstream certificates based on incoming certificate attributes:
 
@@ -96,30 +107,30 @@ Add roles and groups to upstream certificates based on incoming certificate attr
 | `--add-group-to-org` | Add groups when Organization matches | `--add-group-to-org "platform-team=platform,infra"` |
 | `--add-group-to-ou` | Add groups when OU matches | `--add-group-to-ou "engineering=eng-team,builders"` |
 
-Example using both mapping types:
+#### Example Flow
+
+Here's a complete example of how identity translation works:
+
 ```bash
 itp --listen :8443 \
-    --cert server.crt \
-    --key server.key \
-    --ca ca.crt \
-    # Direct field mapping
-    --map-common-name "external.admin=internal.admin" \
-    --map-organization "external-team=internal-team" \
-    # Conditional role/group injection
-    --add-role-to-cn "external.admin=cluster-admin,developer" \
-    --add-group-to-org "external-team=platform-admins,sre"
+    --map-common-name "external-user=internal-user" \
+    --add-role-to-cn "internal-user=admin,reader" \
+    --add-group-to-org "external-org=group1,group2"
 ```
 
-This configuration would:
-1. Map CN "external.admin" to "internal.admin"
-2. Map Organization "external-team" to "internal-team"
-3. Add roles "cluster-admin" and "developer" when CN is "external.admin"
-4. Add groups "platform-admins" and "sre" when Organization contains "external-team"
-
-The resulting upstream certificate would have:
-- CN: "internal.admin"
-- Organization: ["internal-team", "platform-admins", "sre"]
-- OrganizationalUnit: ["cluster-admin", "developer"]
+When a client connects with a certificate:
+1. CN="external-user", O="external-org"
+2. Phase 1 (Basic Translation):
+   - CN is mapped to "internal-user" (due to --map-common-name)
+   - O remains "external-org" (no explicit mapping)
+3. Phase 2 (Role/Group Enhancement):
+   - Roles ["admin", "reader"] are added (CN matches "internal-user")
+   - Groups ["group1", "group2"] are added (O matches "external-org")
+4. Final Identity:
+   - CN: "internal-user"
+   - O: "external-org"
+   - Roles: ["admin", "reader"]
+   - Groups: ["group1", "group2"]
 
 ### Inject HTTP headers
 

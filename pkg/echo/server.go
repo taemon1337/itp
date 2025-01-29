@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,22 +42,25 @@ type RouteInfo struct {
 }
 
 type RequestInfo struct {
-	Method string `json:"method"`
-	Path   string `json:"path"`
-	Host   string `json:"host"`
+	Method  string      `json:"method"`
+	Path    string      `json:"path"`
+	Host    string      `json:"host"`
+	Headers http.Header `json:"headers"`
 }
 
 // Server represents an echo server that reflects connection information
 type Server struct {
 	listener net.Listener
 	cert     *tls.Certificate
+	ca       *x509.CertPool
 	name     string
 }
 
 // New creates a new echo server
-func New(cert *tls.Certificate, name string) *Server {
+func New(cert *tls.Certificate, ca *x509.CertPool, name string) *Server {
 	return &Server{
 		cert: cert,
+		ca:   ca,
 		name: name,
 	}
 }
@@ -65,7 +69,9 @@ func New(cert *tls.Certificate, name string) *Server {
 func (s *Server) Start(addr string) error {
 	config := &tls.Config{
 		Certificates: []tls.Certificate{*s.cert},
-		ClientAuth:   tls.RequestClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    s.ca,
+		RootCAs:      s.ca,
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -140,14 +146,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Create buffered reader and writer
+	reader := bufio.NewReader(tlsConn)
+	writer := bufio.NewWriter(tlsConn)
+
 	// Read HTTP request
-	log.Printf("Reading request from %s", conn.RemoteAddr())
-	req, err := http.ReadRequest(bufio.NewReader(tlsConn))
+	req, err := http.ReadRequest(reader)
 	if err != nil {
 		log.Printf("failed to read request: %v", err)
 		return
 	}
-	log.Printf("Got request: %s %s %s", req.Method, req.URL.Path, req.Host)
+	log.Printf("[ECHO] request: %s %s %s (from %s)", req.Method, req.URL.Path, req.Host, conn.RemoteAddr())
 
 	state := tlsConn.ConnectionState()
 
@@ -163,9 +172,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Route: RouteInfo{
 			UpstreamName: s.name,
 			Request: RequestInfo{
-				Method: req.Method,
-				Path:   req.URL.Path,
-				Host:   req.Host,
+				Method:  req.Method,
+				Path:    req.URL.Path,
+				Host:    req.Host,
+				Headers: req.Header,
 			},
 		},
 	}
@@ -197,14 +207,23 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Header: http.Header{
 			"Content-Type":   []string{"application/json"},
 			"Content-Length": []string{fmt.Sprintf("%d", len(jsonData))},
+			"Connection":     []string{"close"},
 		},
 		Body:          io.NopCloser(bytes.NewReader(jsonData)),
 		ContentLength: int64(len(jsonData)),
 	}
 
-	// Send response
-	if err := resp.Write(conn); err != nil {
-		log.Printf("failed to send response: %v", err)
+	// Send response using buffered writer
+	if err := resp.Write(writer); err != nil {
+		log.Printf("failed to write response: %v", err)
 		return
 	}
+
+	// Flush the buffered writer
+	if err := writer.Flush(); err != nil {
+		log.Printf("failed to flush response: %v", err)
+		return
+	}
+
+	log.Printf("[ECHO] sent response: %d bytes", len(jsonData))
 }

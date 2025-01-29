@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/itp/pkg/identity"
+	"github.com/itp/pkg/logger"
 	"github.com/itp/pkg/proxy"
 )
 
@@ -54,7 +55,31 @@ func main() {
 	groupsToOrg := flag.String("add-group-to-org", "", "Add groups when Organization matches, format: org=group1,group2[;org=group1,group2,...]")
 	groupsToOU := flag.String("add-group-to-ou", "", "Add groups when OU matches, format: ou=group1,group2[;ou=group1,group2,...]")
 
+	// Logging flags
+	proxyLogLevel := flag.String("proxy-log-level", "INFO", "Log level for proxy component (ERROR, WARN, INFO, DEBUG)")
+	routerLogLevel := flag.String("router-log-level", "INFO", "Log level for router component (ERROR, WARN, INFO, DEBUG)")
+	translatorLogLevel := flag.String("translator-log-level", "INFO", "Log level for translator component (ERROR, WARN, INFO, DEBUG)")
+	echoLogLevel := flag.String("echo-log-level", "INFO", "Log level for echo server component (ERROR, WARN, INFO, DEBUG)")
+
 	flag.Parse()
+
+	// Initialize loggers
+	proxyLogger, err := logger.ParseLevel(*proxyLogLevel)
+	if err != nil {
+		log.Fatalf("Invalid proxy log level: %v", err)
+	}
+	routerLogger, err := logger.ParseLevel(*routerLogLevel)
+	if err != nil {
+		log.Fatalf("Invalid router log level: %v", err)
+	}
+	translatorLogger, err := logger.ParseLevel(*translatorLogLevel)
+	if err != nil {
+		log.Fatalf("Invalid translator log level: %v", err)
+	}
+	echoLogger, err := logger.ParseLevel(*echoLogLevel)
+	if err != nil {
+		log.Fatalf("Invalid echo log level: %v", err)
+	}
 
 	// Create proxy configuration
 	config := proxy.Config{
@@ -76,6 +101,12 @@ func main() {
 		CertStoreTTL:     24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
 		CertStoreNamespace: "default", // TODO: Add namespace flag if needed
+
+		// Logger config
+		ProxyLogger:      logger.New("proxy", proxyLogger),
+		RouterLogger:     logger.New("router", routerLogger),
+		TranslatorLogger: logger.New("translator", translatorLogger),
+		EchoLogger:      logger.New("echo", echoLogger),
 	}
 
 	// Initialize proxy

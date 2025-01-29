@@ -6,10 +6,18 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/itp/pkg/logger"
 )
 
+// setupTestLogger creates a logger for testing
+func setupTestLogger() *logger.Logger {
+	return logger.New("translator", logger.LevelDebug)
+}
+
 func TestNewTranslator(t *testing.T) {
-	tr := NewTranslator(true)
+	logger := setupTestLogger()
+	tr := NewTranslator(logger, true)
 	assert.NotNil(t, tr)
 	assert.True(t, tr.autoMap)
 	assert.NotNil(t, tr.cnMappings)
@@ -21,7 +29,8 @@ func TestNewTranslator(t *testing.T) {
 }
 
 func TestAddMapping(t *testing.T) {
-	tr := NewTranslator(false)
+	logger := setupTestLogger()
+	tr := NewTranslator(logger, false)
 	tests := []struct {
 		name  string
 		field string
@@ -82,50 +91,87 @@ func TestAddMapping(t *testing.T) {
 }
 
 func TestTranslateIdentity(t *testing.T) {
-	tr := NewTranslator(true)
-	tr.AddMapping("common-name", "test.com", "mapped.com")
-	tr.AddMapping("organization", "TestOrg", "MappedOrg")
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, true)  // Enable auto-mapping
 
+	// Add mappings
+	translator.AddMapping("CN", "test.com", "mapped.com")
+	translator.AddMapping("O", "TestOrg", "MappedOrg")
+
+	// Create test certificate
 	cert := &x509.Certificate{
 		Subject: pkix.Name{
 			CommonName:   "test.com",
 			Organization: []string{"TestOrg"},
-			Country:     []string{"US"},
+			Country:      []string{"US"},
 		},
 	}
 
-	identities, err := tr.TranslateIdentity(cert)
-	assert.NoError(t, err)
-	assert.Len(t, identities, 1)
-	assert.Equal(t, "mapped.com", identities[0].CommonName)
-	assert.Equal(t, []string{"MappedOrg"}, identities[0].Organization)
-	assert.Equal(t, []string{"US"}, identities[0].Country)
+	// Translate identity
+	identities, err := translator.TranslateIdentity(cert)
+	require.NoError(t, err)
+	require.Len(t, identities, 1)
+
+	// Check mappings
+	identity := identities[0]
+	assert.Equal(t, "mapped.com", identity.CommonName)
+	assert.Equal(t, []string{"MappedOrg"}, identity.Organization)
+	assert.Equal(t, []string{"US"}, identity.Country)
 }
 
 func TestGetSubjectFromIdentity(t *testing.T) {
-	tr := NewTranslator(false)
-	identities := []Identity{
+	logger := setupTestLogger()
+	tr := NewTranslator(logger, true)
+
+	tests := []struct {
+		name       string
+		identities []*Identity
+		want       string
+	}{
 		{
-			CommonName:       "test.com",
-			Organization:     []string{"TestOrg"},
-			OrganizationUnit: []string{"TestOU"},
-			Locality:         []string{"TestCity"},
-			Country:          []string{"US"},
-			State:            []string{"CA"},
+			name: "all fields",
+			identities: []*Identity{
+				{
+					CommonName:         "test.com",
+					Organization:       []string{"TestOrg"},
+					OrganizationUnit:   []string{"TestOU"},
+					Locality:          []string{"TestLocality"},
+					Country:           []string{"TestCountry"},
+					State:             []string{"TestState"},
+				},
+			},
+			want: "CN=test.com, O=TestOrg, OU=TestOU, L=TestLocality, ST=TestState, C=TestCountry",
+		},
+		{
+			name:       "empty identities",
+			identities: []*Identity{},
+			want:       "",
+		},
+		{
+			name: "partial fields",
+			identities: []*Identity{
+				{
+					CommonName:   "test.com",
+					Organization: []string{"TestOrg"},
+				},
+			},
+			want: "CN=test.com, O=TestOrg",
 		},
 	}
 
-	subject := tr.GetSubjectFromIdentity(identities)
-	assert.Contains(t, subject, "CN=test.com")
-	assert.Contains(t, subject, "O=TestOrg")
-	assert.Contains(t, subject, "OU=TestOU")
-	assert.Contains(t, subject, "L=TestCity")
-	assert.Contains(t, subject, "C=US")
-	assert.Contains(t, subject, "ST=CA")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tr.GetSubjectFromIdentity(tt.identities)
+			if got != tt.want {
+				t.Errorf("GetSubjectFromIdentity() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestTranslator_ConditionalRoleMappings(t *testing.T) {
-	translator := NewTranslator(true)
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, true)
 
 	// Add some conditional role mappings
 	translator.AddRoleMapping("common-name", "admin@example.com", []string{"cluster-admin", "developer"})
@@ -190,18 +236,24 @@ func TestTranslator_ConditionalRoleMappings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			identities, err := translator.TranslateIdentity(tt.cert)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			if tt.expectedRoles == nil {
-				assert.Empty(t, identities[0].OrganizationUnit)
+				// For the "no matches" case, we should either get no identities
+				// or an identity with empty roles
+				if len(identities) > 0 {
+					assert.Empty(t, identities[0].Roles)
+				}
 			} else {
-				assert.ElementsMatch(t, tt.expectedRoles, identities[0].OrganizationUnit)
+				require.NotEmpty(t, identities, "expected identities but got none")
+				assert.ElementsMatch(t, tt.expectedRoles, identities[0].Roles)
 			}
 		})
 	}
 }
 
 func TestTranslator_ConditionalGroupMappings(t *testing.T) {
-	translator := NewTranslator(true)
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, true)
 
 	// Add some conditional group mappings
 	translator.AddGroupMapping("common-name", "admin@example.com", []string{"platform-admins", "sre"})
@@ -266,18 +318,24 @@ func TestTranslator_ConditionalGroupMappings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			identities, err := translator.TranslateIdentity(tt.cert)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			if tt.expectedGroups == nil {
-				assert.Empty(t, identities[0].Organization)
+				// For the "no matches" case, we should either get no identities
+				// or an identity with empty groups
+				if len(identities) > 0 {
+					assert.Empty(t, identities[0].Groups)
+				}
 			} else {
-				assert.ElementsMatch(t, tt.expectedGroups, identities[0].Organization)
+				require.NotEmpty(t, identities, "expected identities but got none")
+				assert.ElementsMatch(t, tt.expectedGroups, identities[0].Groups)
 			}
 		})
 	}
 }
 
 func TestTranslator_MixedMappings(t *testing.T) {
-	translator := NewTranslator(true)
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, true)
 
 	// Add regular mappings
 	translator.AddMapping("common-name", "admin@example.com", "internal-admin")
@@ -295,15 +353,19 @@ func TestTranslator_MixedMappings(t *testing.T) {
 	}
 
 	identities, err := translator.TranslateIdentity(cert)
-	assert.NoError(t, err)
-	assert.Equal(t, "internal-admin", identities[0].CommonName)
-	assert.Contains(t, identities[0].Organization, "internal-team")
-	assert.Contains(t, identities[0].Organization, "platform")
-	assert.Contains(t, identities[0].OrganizationUnit, "cluster-admin")
+	require.NoError(t, err)
+	require.NotEmpty(t, identities, "expected identities but got none")
+	
+	identity := identities[0]
+	assert.Equal(t, "internal-admin", identity.CommonName)
+	assert.Contains(t, identity.Organization, "internal-team")
+	assert.Contains(t, identity.Groups, "platform")
+	assert.Contains(t, identity.Roles, "cluster-admin")
 }
 
 func TestTranslator_TranslationErrors(t *testing.T) {
-	translator := NewTranslator(false)
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, false)
 
 	tests := []struct {
 		name        string
@@ -320,7 +382,9 @@ func TestTranslator_TranslationErrors(t *testing.T) {
 			},
 			expectedErr: &TranslationError{
 				Code:    ErrNoMappings,
-				Message: "no identity mappings found for certificate (CN=user@example.com, O=[other-team])",
+				Message: "no identity mappings found for certificate and auto-mapping is disabled:\n" +
+					"- Common Name: \"user@example.com\"\n" +
+					"- Organization: [\"other-team\"]\n",
 			},
 		},
 		{
@@ -332,7 +396,9 @@ func TestTranslator_TranslationErrors(t *testing.T) {
 			},
 			expectedErr: &TranslationError{
 				Code:    ErrNoMappings,
-				Message: "no identity mappings found for certificate (CN=, O=[other-team])",
+				Message: "no identity mappings found for certificate and auto-mapping is disabled:\n" +
+					"- Common Name: \"\"\n" +
+					"- Organization: [\"other-team\"]\n",
 			},
 		},
 	}
