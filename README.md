@@ -33,23 +33,109 @@ make build
 
 1. Start the proxy with basic configuration:
 ```bash
-itp --listen :8443 \
-    --cert server.crt \
-    --key server.key \
-    --ca ca.crt
+itp --server-cert server.crt \
+    --server-key server.key \
+    --server-ca ca.crt \
+    --addr :8443
 ```
 
-2. Add identity mappings:
+2. Use automatic mapping and routing:
 ```bash
-itp --listen :8443 \
-    --cert server.crt \
-    --key server.key \
-    --ca ca.crt \
-    --map-organization "ExternalOrg=InternalGroup" \
-    --map-common-name "external.user@example.com=internal.user"
+itp --server-cert server.crt \
+    --server-key server.key \
+    --server-ca ca.crt \
+    --addr :8443 \
+    --map-auto \
+    --route "app.cluster.com=app.default.svc.cluster.local"
 ```
 
 ## Configuration
+
+### Command Line Arguments
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--addr` | Address for TLS proxy server to listen on | `:8443` |
+| `--server-cert` | Server certificate file or 'auto' for auto-generated | `auto` |
+| `--server-key` | Server key file or 'auto' for auto-generated | `auto` |
+| `--server-ca` | CA certificate file for server cert (only used with auto-generated certs) | |
+| `--server-allow-unknown-client-certs` | Allow client certificates from unknown CAs | `false` |
+| `--map-auto` | Automatically map client CN to upstream CN | `false` |
+| `--server-name` | If generating server certificates, use this server name for TLS connection | |
+| `--internal-domain` | Internal domain for inside/upstream connections | `cluster.local` |
+| `--external-domain` | External domain for incoming connections | |
+| `--cert-store` | Certificate store type (k8s or auto) | `auto` |
+| `--echo` | Name for the echo upstream (e.g. 'echo' to use in --route src=echo) | |
+| `--echo-addr` | Address for echo upstream server | `:8444` |
+| `--config` | Path to YAML configuration file for identity mappings and headers | |
+| `--route` | Static routes in format src=dest[,src=dest,...] | |
+| `--route-via-dns` | Allow routing to unspecified destinations via DNS | `false` |
+| `--inject-header` | Inject headers in format upstream=name=template[,upstream=name=template,...] | |
+| `--inject-headers-upstream` | Inject headers into upstream requests | `false` |
+| `--inject-headers-downstream` | Inject headers into downstream responses | `false` |
+| `--add-role` | Add roles in format field=value=role1,role2,... | |
+| `--add-auth` | Add auth values in format field=value=auth1,auth2,... | |
+
+The `--add-role` and `--add-auth` flags support these fields:
+- `cn` - Common Name
+- `org` - Organization
+- `ou` - Organizational Unit
+- `l` - Locality
+- `c` - Country
+- `st` - State
+
+The value can be:
+- An exact match (e.g., `cn=admin@example.com`)
+- A wildcard `*` to match any value (e.g., `cn=*`)
+
+Example:
+```bash
+# Add admin role to any certificate with CN=admin@example.com
+--add-role "cn=admin@example.com=admin"
+
+# Add read,write auths to all certificates (using wildcard)
+--add-auth "cn=*=read,write"
+
+# Add viewer role to all certificates in the engineering org
+--add-role "org=engineering=viewer"
+```
+
+The `--inject-header` flag supports Go templates with these variables:
+- `{{.CommonName}}` - Certificate common name
+- `{{.Organization}}` - Organization names
+- `{{.OrganizationalUnit}}` - Organizational unit names
+- `{{.Groups}}` - Group names
+- `{{.Roles}}` - Role names
+- `{{.Auths}}` - Auth values
+
+Example:
+```bash
+itp --inject-header 'backend=X-Viper-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}'
+```
+
+### YAML Configuration
+
+For more complex setups, you can use a YAML configuration file:
+
+```yaml
+rules:
+  - source: "cn"    # certificate field to match (cn, org, ou)
+    match: "value"  # value to match
+    roles: []       # roles to add
+    groups: []      # groups to add
+    auths: []       # auth values to add
+    attributes: {}  # other attributes to set
+
+headers:
+  - upstream: "backend"  # upstream service name
+    headers:            # headers to inject
+      X-User: "value"
+```
+
+Use the configuration file with:
+```bash
+itp --config config.yaml
+```
 
 ### Routing Options
 
@@ -72,9 +158,9 @@ ITP provides a powerful identity translation system that works in two phases:
      a) Use explicit mappings to translate certificate fields to new values (using `--map-*` flags)
      b) Auto-map the certificate fields as-is when `--map-auto` is enabled and no explicit mappings exist
    
-2. **Role and Group Enhancement** (Phase 2)
-   - After the basic translation, ITP can add roles and groups based on the *translated* certificate fields
-   - This happens through conditional mapping flags (`--add-role-to-*` and `--add-group-to-*`)
+2. **Role, Group, and Auth Enhancement** (Phase 2)
+   - After the basic translation, ITP can add roles, groups, and auth values based on the *translated* certificate fields
+   - This happens through conditional mapping flags (`--add-role`, `--add-auth`)
    - The conditions are evaluated against the original certificate values
 
 #### Direct Field Mapping (Phase 1)
@@ -94,43 +180,37 @@ Auto-mapping can be enabled with `--map-auto`. When enabled and no explicit mapp
 - All certificate fields are copied as-is to the internal certificate
 - For example, if external cert has CN="user1", the internal cert will also have CN="user1"
 
-#### Conditional Role/Group Injection (Phase 2)
+#### Conditional Role/Group/Auth Injection (Phase 2)
 
-Add roles and groups to upstream certificates based on incoming certificate attributes:
+Add roles, groups, and auth values to upstream certificates based on incoming certificate attributes:
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `--add-role-to-cn` | Add roles when CN matches | `--add-role-to-cn "admin@example.com=cluster-admin,developer"` |
-| `--add-role-to-org` | Add roles when Organization matches | `--add-role-to-org "platform-team=operator,deployer"` |
-| `--add-role-to-ou` | Add roles when OU matches | `--add-role-to-ou "engineering=developer,debugger"` |
-| `--add-group-to-cn` | Add groups when CN matches | `--add-group-to-cn "admin@example.com=platform-admins,sre"` |
-| `--add-group-to-org` | Add groups when Organization matches | `--add-group-to-org "platform-team=platform,infra"` |
-| `--add-group-to-ou` | Add groups when OU matches | `--add-group-to-ou "engineering=eng-team,builders"` |
+| `--add-role` | Add roles based on certificate field | `--add-role "cn=admin@example.com=admin,viewer"` |
+| `--add-auth` | Add auth values based on certificate field | `--add-auth "cn=admin@example.com=read,write"` |
 
-#### Example Flow
+#### Header Templates
 
-Here's a complete example of how identity translation works:
+Headers can use Go templates with the following variables:
+- `{{.CommonName}}` - the client cert CN
+- `{{.Organization}}` - the client cert O
+- `{{.OrganizationalUnit}}` - the client cert OU
+- `{{.Roles}}` - array of roles
+- `{{.Groups}}` - array of groups
+- `{{.Auths}}` - array of auth values
 
-```bash
-itp --listen :8443 \
-    --map-common-name "external-user=internal-user" \
-    --add-role-to-cn "internal-user=admin,reader" \
-    --add-group-to-org "external-org=group1,group2"
+Example complex header template:
+```yaml
+headers:
+  - upstream: "backend"
+    headers:
+      X-Viper-User: "USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}};{{range .Auths}}AUTH:{{.}}{{end}}"
 ```
 
-When a client connects with a certificate:
-1. CN="external-user", O="external-org"
-2. Phase 1 (Basic Translation):
-   - CN is mapped to "internal-user" (due to --map-common-name)
-   - O remains "external-org" (no explicit mapping)
-3. Phase 2 (Role/Group Enhancement):
-   - Roles ["admin", "reader"] are added (CN matches "internal-user")
-   - Groups ["group1", "group2"] are added (O matches "external-org")
-4. Final Identity:
-   - CN: "internal-user"
-   - O: "external-org"
-   - Roles: ["admin", "reader"]
-   - Groups: ["group1", "group2"]
+This would generate headers like:
+```
+X-Viper-User: USER:admin@example.com;ROLE:admins;ROLE:eng-team;AUTH:read;AUTH:write
+```
 
 ### Inject HTTP headers
 
@@ -143,7 +223,7 @@ Use `--inject-header` for full template control:
 
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--inject-header` | Inject custom headers using templates | `--inject-header "app.svc=X-Groups:{{.Groups}},app.svc=X-Custom:static-value"` |
+| `--inject-header` | Inject custom headers using templates | `--inject-header "app.svc=X-Groups={{.Groups}},app.svc=X-Custom=static-value"` |
 
 Available template variables:
 - `.CommonName` - Certificate common name
@@ -183,9 +263,9 @@ This will inject three headers for requests to `app.svc`:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--cert` | Server certificate file | Required |
-| `--key` | Server private key file | Required |
-| `--ca` | CA certificate for client verification | Required |
+| `--cert` | Server certificate file or 'auto' for auto-generated | `auto` |
+| `--key` | Server key file or 'auto' for auto-generated | `auto` |
+| `--ca` | CA certificate file for server cert (only used with auto-generated certs) | |
 | `--listen` | Address to listen on | `:8443` |
 | `--verify-client` | Require client certificate | `true` |
 

@@ -134,13 +134,7 @@ echo: ## Run itp with echo
 	docker run --rm \
 	-v $(PWD):/app -w /app \
 	-p 8443:8443 $(DOCKER_BUILD_IMAGE) \
-	sh -c "./itp --echo echo --server-allow-unknown-client-certs --route "localhost=echo" --add-group-to-cn "curler=AdminCurlGroup" --inject-groups "localhost=X-Echo-Groups" --map-auto --external-domain external.com --inject-headers-downstream"
-
-echo-tcp:
-	docker run --rm \
-	-v $(PWD):/app -w /app \
-	-p 8443:8443 $(DOCKER_BUILD_IMAGE) \
-	sh -c "./itp --echo echo --server-allow-unknown-client-certs --route "localhost=echo" --add-group-to-cn "curler=AdminCurlGroup" --map-auto --external-domain external.com --inject-headers-downstream"
+	sh -c "./itp --echo echo --server-allow-unknown-client-certs --route localhost=echo --map-auto --external-domain external.com --inject-header 'localhost=X-Viper-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' --inject-headers-upstream --add-role 'cn=curler=echo-user' --add-auth 'cn=*=read,write'"
 
 .PHONY: all
 all: clean deps fmt vet lint test build ## Run all tasks (clean, deps, fmt, vet, lint, test, build)

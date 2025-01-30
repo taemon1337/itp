@@ -9,6 +9,13 @@ import (
 	"github.com/itp/pkg/identity"
 )
 
+// RoleConfig represents a custom role configuration
+type RoleConfig struct {
+	Name     string            // Name of the role (e.g., "admin", "developer")
+	Template string            // Template for the role value
+	Mappings map[string]string // Custom mappings for role values
+}
+
 // HeaderTemplate represents a template for injecting headers
 type HeaderTemplate struct {
 	Name     string
@@ -24,18 +31,52 @@ type HeaderMapping struct {
 
 // HeaderInjector manages header injection for upstreams
 type HeaderInjector struct {
-	mappings map[string][]HeaderTemplate
-	templates map[string]map[string]*template.Template
-	logger    *log.Logger
+	mappings   map[string][]HeaderTemplate
+	templates  map[string]map[string]*template.Template
+	roleConfig map[string]*RoleConfig // Maps role name to its configuration
+	logger     *log.Logger
 }
 
 // NewHeaderInjector creates a new header injector
 func NewHeaderInjector() *HeaderInjector {
 	return &HeaderInjector{
-		mappings: make(map[string][]HeaderTemplate),
-		templates: make(map[string]map[string]*template.Template),
-		logger:    log.Default(),
+		mappings:   make(map[string][]HeaderTemplate),
+		templates:  make(map[string]map[string]*template.Template),
+		roleConfig: make(map[string]*RoleConfig),
+		logger:     log.Default(),
 	}
+}
+
+// AddCustomRole adds a custom role configuration
+func (h *HeaderInjector) AddCustomRole(name, templateStr string) error {
+	h.logger.Printf("Adding custom role %q with template %q", name, templateStr)
+	
+	// Parse template to validate it
+	tmpl := template.New("role")
+	_, err := tmpl.Parse(templateStr)
+	if err != nil {
+		h.logger.Printf("Failed to parse role template: %v", err)
+		return fmt.Errorf("failed to parse role template: %v", err)
+	}
+
+	h.roleConfig[name] = &RoleConfig{
+		Name:     name,
+		Template: templateStr,
+		Mappings: make(map[string]string),
+	}
+	return nil
+}
+
+// AddRoleMapping adds a mapping for a custom role
+func (h *HeaderInjector) AddRoleMapping(roleName, key, value string) error {
+	role, ok := h.roleConfig[roleName]
+	if !ok {
+		return fmt.Errorf("unknown role name: %s", roleName)
+	}
+
+	h.logger.Printf("Adding role mapping %s=%s for role %q", key, value, roleName)
+	role.Mappings[key] = value
+	return nil
 }
 
 // AddHeader adds a header template for an upstream
@@ -81,25 +122,30 @@ func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateS
 func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string) error {
 	h.logger.Printf("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
 	
-	var template string
+	var templateStr string
 	switch headerType {
 	case "groups":
-		template = "{{ range .Groups }}{{ . }}{{ end }}"
+		templateStr = "{{ range .Groups }}{{ . }}{{ end }}"
 	case "roles":
-		template = "{{ range .Roles }}{{ . }}{{ end }}"
+		// Check if this is a custom role
+		if role, ok := h.roleConfig[headerName]; ok {
+			templateStr = role.Template
+		} else {
+			templateStr = "{{ range .Roles }}{{ . }}{{ end }}"
+		}
 	case "cn":
-		template = "{{ .CommonName }}"
+		templateStr = "{{ .CommonName }}"
 	case "org":
-		template = "{{ range .Organization }}{{ . }}{{ end }}"
+		templateStr = "{{ range .Organization }}{{ . }}{{ end }}"
 	case "ou":
-		template = "{{ range .OrganizationUnit }}{{ . }}{{ end }}"
+		templateStr = "{{ range .OrganizationUnit }}{{ . }}{{ end }}"
 	default:
 		h.logger.Printf("Unknown header type: %s", headerType)
 		return fmt.Errorf("unknown header type: %s", headerType)
 	}
 	
-	h.logger.Printf("Using template: %q", template)
-	return h.AddHeader(upstream, headerName, template)
+	h.logger.Printf("Using template: %q", templateStr)
+	return h.AddHeader(upstream, headerName, templateStr)
 }
 
 func (h *HeaderInjector) HasHeaders(upstream string, identity *identity.Identity) bool {

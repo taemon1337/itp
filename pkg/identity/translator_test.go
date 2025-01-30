@@ -418,3 +418,76 @@ func TestTranslator_TranslationErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestTranslator_ConditionalAuthMappings(t *testing.T) {
+	logger := setupTestLogger()
+	translator := NewTranslator(logger, true)
+
+	// Add some conditional auth mappings
+	translator.AddAuthMapping("common-name", "admin@example.com", []string{"read", "write"})
+	translator.AddAuthMapping("organization", "platform-team", []string{"deploy", "manage"})
+	translator.AddAuthMapping("organization-unit", "engineering", []string{"create", "delete"})
+
+	tests := []struct {
+		name          string
+		cert         *x509.Certificate
+		expectedAuths []string
+	}{
+		{
+			name: "CN match should add auths",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName: "admin@example.com",
+				},
+			},
+			expectedAuths: []string{"read", "write"},
+		},
+		{
+			name: "Organization match should add auths",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					Organization: []string{"platform-team"},
+				},
+			},
+			expectedAuths: []string{"deploy", "manage"},
+		},
+		{
+			name: "OU match should add auths",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedAuths: []string{"create", "delete"},
+		},
+		{
+			name: "Multiple matches should combine auths",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:         "admin@example.com",
+					Organization:       []string{"platform-team"},
+					OrganizationalUnit: []string{"engineering"},
+				},
+			},
+			expectedAuths: []string{"read", "write", "deploy", "manage", "create", "delete"},
+		},
+		{
+			name: "No matches should result in empty auths",
+			cert: &x509.Certificate{
+				Subject: pkix.Name{
+					CommonName:   "user@example.com",
+					Organization: []string{"other-team"},
+				},
+			},
+			expectedAuths: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			identity, err := translator.TranslateIdentity(tt.cert)
+			assert.NoError(t, err)
+			assert.ElementsMatch(t, tt.expectedAuths, identity.Auths)
+		})
+	}
+}

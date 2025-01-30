@@ -2,14 +2,37 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"strings"
-	"time"
 
-	"github.com/itp/pkg/identity"
 	"github.com/itp/pkg/logger"
 	"github.com/itp/pkg/proxy"
+	"gopkg.in/yaml.v3"
 )
+
+// MappingRule defines a single identity mapping rule
+type MappingRule struct {
+	Source     string            `yaml:"source" json:"source"`           // "cn", "org", "ou"
+	Match      string            `yaml:"match" json:"match"`            // Value to match
+	Roles      []string          `yaml:"roles" json:"roles"`            // Roles to add
+	Groups     []string          `yaml:"groups" json:"groups"`          // Groups to add
+	Auths      []string          `yaml:"auths" json:"auths"`           // Auth values to add
+	Attributes map[string]string `yaml:"attributes" json:"attributes"`  // Other attributes to set
+}
+
+// HeaderRule defines header injection rules
+type HeaderRule struct {
+	Upstream string            `yaml:"upstream" json:"upstream"`
+	Headers  map[string]string `yaml:"headers" json:"headers"`
+}
+
+// Config holds all identity and header configuration
+type Config struct {
+	Rules   []MappingRule `yaml:"rules" json:"rules"`
+	Headers []HeaderRule  `yaml:"headers" json:"headers"`
+}
 
 func main() {
 	log.Printf("starting Identity Translation Proxy")
@@ -27,259 +50,140 @@ func main() {
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
 	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
 	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
-	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream request by to client")
-	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream request by to client")
+	injectHeaders := flag.String("inject-header", "", "Inject headers in format upstream=name=template[,upstream=name=template,...] (e.g. 'backend=X-Viper-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}')")
+	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream requests")
+	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream responses")
+	addRole := flag.String("add-role", "", "Add roles in format field=value=role1,role2,... (e.g. 'cn=admin=admin,viewer')")
+	addAuth := flag.String("add-auth", "", "Add auth values in format field=value=auth1,auth2,... (e.g. 'cn=admin=read,write')")
 
-	// Routing flags
+	// Configuration flags
+	configFile := flag.String("config", "", "Path to YAML configuration file for identity mappings and headers")
 	routes := flag.String("route", "", "Static routes in format src=dest[,src=dest,...]")
-	routeViaDNS := flag.Bool("route-via-dns", false, "Allow routing to unspecified destinations by resolving them via DNS (WARNING: enabling this will attempt to resolve unknown hostnames)")
-
-	// Identity mapping flags
-	cnMappings := flag.String("map-common-name", "", "Common name mappings in format src=identity[,src=identity,...]")
-	orgMappings := flag.String("map-organization", "", "Organization mappings")
-	countryMappings := flag.String("map-country", "", "Country mappings")
-	stateMappings := flag.String("map-state", "", "State mappings")
-	localityMappings := flag.String("map-locality", "", "Locality mappings")
-	ouMappings := flag.String("map-organization-unit", "", "Organizational unit mappings")
-
-	// Header injection flags
-	injectHeader := flag.String("inject-header", "", "Inject custom headers, format: upstream=header:template[,upstream=header:template,...]")
-	injectGroups := flag.String("inject-groups", "", "Inject groups header, format: upstream=header[,upstream=header,...]")
-	injectRoles := flag.String("inject-roles", "", "Inject roles header, format: upstream=header[,upstream=header,...]")
-	injectCN := flag.String("inject-cn", "", "Inject CN header, format: upstream=header[,upstream=header,...]")
-	injectOrg := flag.String("inject-org", "", "Inject organization header, format: upstream=header[,upstream=header,...]")
-	injectOU := flag.String("inject-ou", "", "Inject organizational unit header, format: upstream=header[,upstream=header,...]")
-
-	// Conditional role mapping flags
-	rolesToCN := flag.String("add-role-to-cn", "", "Add roles when CN matches, format: cn=role1,role2[;cn=role1,role2,...]")
-	rolesToOrg := flag.String("add-role-to-org", "", "Add roles when Organization matches, format: org=role1,role2[;org=role1,role2,...]")
-	rolesToOU := flag.String("add-role-to-ou", "", "Add roles when OU matches, format: ou=role1,role2[;ou=role1,role2,...]")
-
-	// Conditional group mapping flags
-	groupsToCN := flag.String("add-group-to-cn", "", "Add groups when CN matches, format: cn=group1,group2[;cn=group1,group2,...]")
-	groupsToOrg := flag.String("add-group-to-org", "", "Add groups when Organization matches, format: org=group1,group2[;org=group1,group2,...]")
-	groupsToOU := flag.String("add-group-to-ou", "", "Add groups when OU matches, format: ou=group1,group2[;ou=group1,group2,...]")
-
-	// Logging flags
-	proxyLogLevel := flag.String("proxy-log-level", "INFO", "Log level for proxy component (ERROR, WARN, INFO, DEBUG)")
-	routerLogLevel := flag.String("router-log-level", "DEBUG", "Log level for router component (ERROR, WARN, INFO, DEBUG)")
-	translatorLogLevel := flag.String("translator-log-level", "INFO", "Log level for translator component (ERROR, WARN, INFO, DEBUG)")
-	echoLogLevel := flag.String("echo-log-level", "INFO", "Log level for echo server component (ERROR, WARN, INFO, DEBUG)")
+	routeViaDNS := flag.Bool("route-via-dns", false, "Allow routing to unspecified destinations via DNS")
 
 	flag.Parse()
 
-	// Initialize loggers
-	proxyLogger, err := logger.ParseLevel(*proxyLogLevel)
-	if err != nil {
-		log.Fatalf("Invalid proxy log level: %v", err)
-	}
-	routerLogger, err := logger.ParseLevel(*routerLogLevel)
-	if err != nil {
-		log.Fatalf("Invalid router log level: %v", err)
-	}
-	translatorLogger, err := logger.ParseLevel(*translatorLogLevel)
-	if err != nil {
-		log.Fatalf("Invalid translator log level: %v", err)
-	}
-	echoLogger, err := logger.ParseLevel(*echoLogLevel)
-	if err != nil {
-		log.Fatalf("Invalid echo log level: %v", err)
-	}
-
 	// Create proxy configuration
 	config := &proxy.Config{
-		// Server TLS config
-		CertFile:          *certFile,
-		KeyFile:           *keyFile,
-		CAFile:           *caFile,
-		ServerName:       *serverName,
-		InternalDomain:   *internalDomain,
-		ExternalDomain:   *externalDomain,
+		CertFile:           *certFile,
+		KeyFile:            *keyFile,
+		CAFile:            *caFile,
+		ServerName:        *serverName,
+		InternalDomain:    *internalDomain,
+		ExternalDomain:    *externalDomain,
 		AllowUnknownCerts: *allowUnknownClients,
 		ListenAddr:        *addr,
-
-		// control if headers should be injected
-		InjectHeadersUpstream:   *injectHeadersUpstream,
-		InjectHeadersDownstream: *injectHeadersDownstream,
-
-		// Echo server config
 		EchoName:         *echoName,
 		EchoAddr:         *echoAddr,
 		RouteViaDNS:      *routeViaDNS,
 		AutoMapCN:        *mapAuto,
-
-		// Certificate store config
 		CertStoreType:    *certStoreType,
-		CertStoreTTL:     24 * time.Hour,
-		CertStoreCacheDuration: time.Hour,
-		CertStoreNamespace: "default", // TODO: Add namespace flag if needed
-
-		// Logger config
-		ProxyLogger:      logger.New("proxy", proxyLogger),
-		RouterLogger:     logger.New("router", routerLogger),
-		TranslatorLogger: logger.New("translator", translatorLogger),
-		EchoLogger:      logger.New("echo", echoLogger),
+		ProxyLogger:      logger.New("proxy", logger.LevelInfo),
+		RouterLogger:     logger.New("router", logger.LevelInfo),
+		TranslatorLogger: logger.New("translator", logger.LevelInfo),
+		EchoLogger:      logger.New("echo", logger.LevelInfo),
+		InjectHeadersUpstream: *injectHeadersUpstream,
+		InjectHeadersDownstream: *injectHeadersDownstream,
 	}
 
-	// Initialize proxy
+	// Create proxy instance
 	p, err := proxy.New(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
 
-	// Add static routes
+	// Add routes
 	if *routes != "" {
 		p.AddRoutes(*routes)
 	}
 
-	// Add identity mappings
-	if *cnMappings != "" {
-		addMappings(p.Translator(), "cn", *cnMappings)
-	}
-	if *orgMappings != "" {
-		addMappings(p.Translator(), "o", *orgMappings)
-	}
-	if *countryMappings != "" {
-		addMappings(p.Translator(), "c", *countryMappings)
-	}
-	if *stateMappings != "" {
-		addMappings(p.Translator(), "st", *stateMappings)
-	}
-	if *localityMappings != "" {
-		addMappings(p.Translator(), "l", *localityMappings)
-	}
-	if *ouMappings != "" {
-		addMappings(p.Translator(), "ou", *ouMappings)
-	}
-
 	// Add role mappings
-	if *rolesToCN != "" {
-		addRoleMappings(p.Translator(), "cn", *rolesToCN)
-	}
-	if *rolesToOrg != "" {
-		addRoleMappings(p.Translator(), "o", *rolesToOrg)
-	}
-	if *rolesToOU != "" {
-		addRoleMappings(p.Translator(), "ou", *rolesToOU)
-	}
-
-	// Add group mappings
-	if *groupsToCN != "" {
-		addGroupMappings(p.Translator(), "cn", *groupsToCN)
-	}
-	if *groupsToOrg != "" {
-		addGroupMappings(p.Translator(), "o", *groupsToOrg)
-	}
-	if *groupsToOU != "" {
-		addGroupMappings(p.Translator(), "ou", *groupsToOU)
+	if *addRole != "" {
+		parts := strings.SplitN(*addRole, "=", 3)
+		if len(parts) != 3 {
+			log.Fatalf("Invalid role mapping format: %s", *addRole)
+		}
+		field, value, roles := parts[0], parts[1], strings.Split(parts[2], ",")
+		p.Translator().AddRoleMapping(field, value, roles)
 	}
 
-	// Add header templates
-	if *injectHeader != "" {
-		addCustomHeaders(p, *injectHeader)
+	// Add auth mappings
+	if *addAuth != "" {
+		parts := strings.SplitN(*addAuth, "=", 3)
+		if len(parts) != 3 {
+			log.Fatalf("Invalid auth mapping format: %s", *addAuth)
+		}
+		field, value, auths := parts[0], parts[1], strings.Split(parts[2], ",")
+		p.Translator().AddAuthMapping(field, value, auths)
 	}
-	if *injectGroups != "" {
-		addCommonHeaders(p, "groups", *injectGroups)
+
+	// Add header injection rules
+	if *injectHeaders != "" {
+		for _, rule := range strings.Split(*injectHeaders, ",") {
+			parts := strings.SplitN(rule, "=", 3)
+			if len(parts) != 3 {
+				log.Fatalf("Invalid header injection rule format: %s", rule)
+			}
+			upstream, name, template := parts[0], parts[1], parts[2]
+			if err := p.AddHeader(upstream, name, template); err != nil {
+				log.Fatalf("Failed to add header injection rule: %v", err)
+			}
+		}
 	}
-	if *injectRoles != "" {
-		addCommonHeaders(p, "roles", *injectRoles)
-	}
-	if *injectCN != "" {
-		addCommonHeaders(p, "cn", *injectCN)
-	}
-	if *injectOrg != "" {
-		addCommonHeaders(p, "org", *injectOrg)
-	}
-	if *injectOU != "" {
-		addCommonHeaders(p, "ou", *injectOU)
+
+	// Apply configuration from file or flags
+	if *configFile != "" {
+		var cfg Config
+		data, err := os.ReadFile(*configFile)
+		if err != nil {
+			log.Fatalf("Failed to read config file: %v", err)
+		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			log.Fatalf("Failed to parse config file: %v", err)
+		}
+		if err := applyConfig(p, &cfg); err != nil {
+			log.Fatalf("Failed to apply config: %v", err)
+		}
 	}
 
 	// Start proxy server
-	log.Fatal(p.ListenAndServe(config))
-}
-
-// addMappings adds identity mappings from a comma-separated string
-func addMappings(t *identity.Translator, field, mappings string) {
-	if mappings == "" {
-		return
-	}
-
-	for _, mapping := range strings.Split(mappings, ",") {
-		parts := strings.Split(mapping, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid mapping format: %s", mapping)
-			continue
-		}
-		t.AddMapping(field, parts[0], parts[1])
+	if err := p.ListenAndServe(config); err != nil {
+		log.Fatalf("Failed to start proxy server: %v", err)
 	}
 }
 
-// addRoleMappings adds role mappings from a semicolon-separated string
-func addRoleMappings(t *identity.Translator, field, mappings string) {
-	if mappings == "" {
-		return
-	}
-
-	for _, mapping := range strings.Split(mappings, ";") {
-		parts := strings.Split(mapping, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid role mapping format: %s", mapping)
-			continue
-		}
-		roles := strings.Split(parts[1], ",")
-		t.AddRoleMapping(field, parts[0], roles)
-	}
-}
-
-// addGroupMappings adds group mappings from a semicolon-separated string
-func addGroupMappings(t *identity.Translator, field, mappings string) {
-	if mappings == "" {
-		return
-	}
-
-	for _, mapping := range strings.Split(mappings, ";") {
-		parts := strings.Split(mapping, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid group mapping format: %s", mapping)
-			continue
-		}
-		groups := strings.Split(parts[1], ",")
-		t.AddGroupMapping(field, parts[0], groups)
-	}
-}
-
-// addCustomHeaders adds custom header templates from a comma-separated string
-func addCustomHeaders(p *proxy.Proxy, mappings string) {
-	for _, mapping := range strings.Split(mappings, ",") {
-		parts := strings.Split(mapping, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid header format: %s", mapping)
-			continue
+func applyConfig(p *proxy.Proxy, cfg *Config) error {
+	// Apply identity mappings
+	for _, rule := range cfg.Rules {
+		// Add roles if specified
+		if len(rule.Roles) > 0 {
+			p.Translator().AddRoleMapping(rule.Source, rule.Match, rule.Roles)
 		}
 
-		headerParts := strings.Split(parts[1], ":")
-		if len(headerParts) != 2 {
-			log.Printf("Invalid header value format: %s", parts[1])
-			continue
+		// Add groups if specified
+		if len(rule.Groups) > 0 {
+			p.Translator().AddGroupMapping(rule.Source, rule.Match, rule.Groups)
 		}
 
-		if err := p.AddHeader(parts[0], headerParts[0], headerParts[1]); err != nil {
-			log.Printf("Failed to add header template: %v", err)
+		// Add auths if specified
+		if len(rule.Auths) > 0 {
+			p.Translator().AddAuthMapping(rule.Source, rule.Match, rule.Auths)
+		}
+
+		// Add attribute mappings if specified
+		for k, v := range rule.Attributes {
+			p.Translator().AddMapping(rule.Source, k, v)
 		}
 	}
-}
 
-// addCommonHeaders adds common header mappings from a comma-separated string
-func addCommonHeaders(p *proxy.Proxy, headerType string, mappings string) {
-	for _, mapping := range strings.Split(mappings, ",") {
-		parts := strings.Split(mapping, "=")
-		if len(parts) != 2 {
-			log.Printf("Invalid header format: %s", mapping)
-			continue
-		}
-
-		if err := p.AddCommonHeader(headerType, parts[0], parts[1]); err != nil {
-			log.Printf("Failed to add common header: %v", err)
+	// Apply header templates
+	for _, rule := range cfg.Headers {
+		for headerName, template := range rule.Headers {
+			if err := p.AddHeader(rule.Upstream, headerName, template); err != nil {
+				return fmt.Errorf("failed to add header template: %v", err)
+			}
 		}
 	}
+
+	return nil
 }

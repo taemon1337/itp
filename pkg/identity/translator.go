@@ -28,6 +28,13 @@ type GroupMapping struct {
 	Groups      []string
 }
 
+// AuthMapping represents a mapping from a certificate attribute to auth values
+type AuthMapping struct {
+	SourceField string // cn, org, ou, locality, country, state
+	SourceValue string
+	Auths      []string
+}
+
 // Identity represents a translated identity
 type Identity struct {
 	CommonName       string
@@ -38,6 +45,7 @@ type Identity struct {
 	State            []string
 	Groups           []string
 	Roles            []string
+	Auths            []string
 }
 
 // Translator handles identity translation between certificate domains
@@ -50,9 +58,10 @@ type Translator struct {
 	stateMappings   map[string]string
 	autoMap         bool
 	
-	// Conditional role and group mappings
-	roleMappings []RoleMapping
+	// Conditional role, group and auth mappings
+	roleMappings  []RoleMapping
 	groupMappings []GroupMapping
+	authMappings  []AuthMapping
 
 	logger *logger.Logger
 }
@@ -69,6 +78,7 @@ func NewTranslator(logger *logger.Logger, autoMap bool) *Translator {
 		autoMap:         autoMap,
 		roleMappings:    make([]RoleMapping, 0),
 		groupMappings:   make([]GroupMapping, 0),
+		authMappings:    make([]AuthMapping, 0),
 		logger:          logger,
 	}
 }
@@ -113,6 +123,16 @@ func (t *Translator) AddGroupMapping(fieldName, fieldValue string, groups []stri
 		SourceField: fieldName,
 		SourceValue: fieldValue,
 		Groups:      groups,
+	})
+}
+
+// AddAuthMapping adds an auth mapping for a specific certificate field
+func (t *Translator) AddAuthMapping(sourceField, sourceValue string, auths []string) {
+	t.logger.Debug("Adding auth mapping %s=%s -> auths=%v", sourceField, sourceValue, auths)
+	t.authMappings = append(t.authMappings, AuthMapping{
+		SourceField: t.normalizeFieldName(sourceField),
+		SourceValue: sourceValue,
+		Auths:      auths,
 	})
 }
 
@@ -185,6 +205,9 @@ func (t *Translator) TranslateIdentity(cert *x509.Certificate) (*Identity, error
 	// Add any group mappings
 	identity.Groups = t.getGroupMappings(cert)
 
+	// Add any auth mappings
+	identity.Auths = t.getAuthMappings(cert)
+
 	t.logger.Debug("Identity translation details:")
 	if source != "" {
 		t.logger.Debug("Found mapping from %s", source)
@@ -212,6 +235,15 @@ func (t *Translator) applyRoleAndGroupMappings(cert *x509.Certificate, identitie
 				t.matchesIdentityField(identity, mapping.SourceField, mapping.SourceValue) {
 				identity.Groups = append(identity.Groups, mapping.Groups...)
 				details.WriteString(fmt.Sprintf("Groups: %s -> %s\n", mapping.SourceValue, formatQuotedArray(mapping.Groups)))
+			}
+		}
+
+		// Apply auth mappings
+		for _, mapping := range t.authMappings {
+			if t.matchesSourceField(cert, mapping.SourceField, mapping.SourceValue) ||
+				t.matchesIdentityField(identity, mapping.SourceField, mapping.SourceValue) {
+				identity.Auths = append(identity.Auths, mapping.Auths...)
+				details.WriteString(fmt.Sprintf("Auths: %s -> %s\n", mapping.SourceValue, formatQuotedArray(mapping.Auths)))
 			}
 		}
 	}
@@ -242,6 +274,9 @@ func (t *Translator) applyMappings(identity *Identity, mappings *Identity) {
 	}
 	if len(mappings.Groups) > 0 {
 		identity.Groups = append(identity.Groups, mappings.Groups...)
+	}
+	if len(mappings.Auths) > 0 {
+		identity.Auths = append(identity.Auths, mappings.Auths...)
 	}
 }
 
@@ -367,6 +402,10 @@ func (t *Translator) findMappedIdentities(cert *x509.Certificate) (*Identity, st
 
 // matchesSourceField checks if a certificate field matches the mapping condition
 func (t *Translator) matchesSourceField(cert *x509.Certificate, field, value string) bool {
+	if value == "*" {
+		return true
+	}
+
 	switch t.normalizeFieldName(field) {
 	case "CN":
 		return cert.Subject.CommonName == value
@@ -406,6 +445,10 @@ func (t *Translator) matchesSourceField(cert *x509.Certificate, field, value str
 
 // matchesIdentityField checks if an identity field matches the mapping condition
 func (t *Translator) matchesIdentityField(identity *Identity, field, value string) bool {
+	if value == "*" {
+		return true
+	}
+
 	switch t.normalizeFieldName(field) {
 	case "CN":
 		return identity.CommonName == value
@@ -502,6 +545,7 @@ func (t *Translator) autoMapIdentity(cert *x509.Certificate) *Identity {
 		State:           cert.Subject.Province,
 		Groups:           []string{},
 		Roles:            []string{},
+		Auths:            []string{},
 	}
 }
 
@@ -523,4 +567,14 @@ func (t *Translator) getGroupMappings(cert *x509.Certificate) []string {
 		}
 	}
 	return groups
+}
+
+func (t *Translator) getAuthMappings(cert *x509.Certificate) []string {
+	auths := make([]string, 0)
+	for _, mapping := range t.authMappings {
+		if t.matchesSourceField(cert, mapping.SourceField, mapping.SourceValue) {
+			auths = append(auths, mapping.Auths...)
+		}
+	}
+	return auths
 }
