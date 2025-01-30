@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strings"
 	"time"
@@ -353,6 +354,51 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	p.handleHTTPConnection(conn, destination, serverName, identity)
 }
 
+// connResponseWriter adapts net.Conn to http.ResponseWriter
+type connResponseWriter struct {
+	conn     net.Conn
+	header   http.Header
+	written  bool
+}
+
+func newConnResponseWriter(conn net.Conn) *connResponseWriter {
+	return &connResponseWriter{
+		conn:   conn,
+		header: make(http.Header),
+	}
+}
+
+func (w *connResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *connResponseWriter) Write(b []byte) (int, error) {
+	if !w.written {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.conn.Write(b)
+}
+
+func (w *connResponseWriter) WriteHeader(statusCode int) {
+	if w.written {
+		return
+	}
+	w.written = true
+
+	// Write status line
+	statusText := http.StatusText(statusCode)
+	if statusText == "" {
+		statusText = "status code " + fmt.Sprint(statusCode)
+	}
+	fmt.Fprintf(w.conn, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
+
+	// Write headers
+	w.header.Write(w.conn)
+	
+	// Write the final CRLF
+	fmt.Fprintf(w.conn, "\r\n")
+}
+
 func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverName string, identity *identity.Identity) {
 	defer conn.Close()
 
@@ -372,107 +418,91 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverNa
 	p.logger.Debug("Using host %s for TLS verification", host)
 	p.logger.Debug("Using server name %s for TLS verification", serverName)
 
-	tlsConfig := &tls.Config{
-		ServerName:   serverName,
-		Certificates: []tls.Certificate{*upstreamClientCert},
-		RootCAs:      p.certStore.GetCertPool(),
-	}
+	// Create the reverse proxy
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = "https"
+			req.URL.Host = destination
 
-	// Create TLS connection to upstream
-	p.logger.Warn("Connecting to upstream %s", destination)
-	upstreamConn, err := tls.Dial("tcp", destination, tlsConfig)
-	if err != nil {
-		p.logger.Error("Failed to connect to upstream %s: %v", destination, err)
-		return
-	}
-	defer upstreamConn.Close()
+			p.logger.Debug("Modifying request for upstream: %s %s", req.Method, req.URL)
+			
+			if p.config.InjectHeadersUpstream {
+				headers, err := p.headerInjector.GetHeaders(serverName, identity)
+				if err != nil {
+					p.logger.Error("Failed to get headers: %v", err)
+					return
+				}
 
-	// Create HTTP client using our TLS connection
-	client := &http.Client{
+				for key, value := range headers {
+					p.logger.Debug("Injecting header %q = %q", key, value)
+					req.Header.Set(key, value)
+				}
+			}
+
+			// Log final request headers
+			p.logger.Debug("Final request headers:")
+			for key, values := range req.Header {
+				p.logger.Debug("  %s: %v", key, values)
+			}
+		},
 		Transport: &http.Transport{
-			DialTLS: func(network, addr string) (net.Conn, error) {
-				return upstreamConn, nil
+			TLSClientConfig: &tls.Config{
+				ServerName:   serverName,
+				Certificates: []tls.Certificate{*upstreamClientCert},
+				RootCAs:      p.certStore.GetCertPool(),
 			},
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if p.config.InjectHeadersDownstream {
+				headers, err := p.headerInjector.GetHeaders(serverName, identity)
+				if err != nil {
+					return fmt.Errorf("failed to get headers: %v", err)
+				}
+
+				for key, value := range headers {
+					p.logger.Debug("Injecting resp header %q = %q", key, value)
+					resp.Header.Set(key, value)
+				}
+			}
+
+			p.logger.Debug("Got response: %d %s", resp.StatusCode, resp.Status)
+			p.logger.Debug("Response headers:")
+			for key, values := range resp.Header {
+				p.logger.Debug("  %s: %v", key, values)
+			}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			p.logger.Error("Proxy error: %v", err)
+			
+			// Try to send an error response if possible
+			if !w.(*connResponseWriter).written {
+				w.WriteHeader(http.StatusBadGateway)
+				w.Write([]byte(fmt.Sprintf("Proxy Error: %v", err)))
+			}
 		},
 	}
 
-	// Read the incoming request
-	req, err := http.ReadRequest(bufio.NewReader(conn))
+	// Create response writer that writes to our connection
+	writer := newConnResponseWriter(conn)
+	reader := bufio.NewReader(conn)
+
+	// Read the request
+	req, err := http.ReadRequest(reader)
 	if err != nil {
 		p.logger.Error("Failed to read request: %v", err)
 		return
 	}
 
-	// Create new request for upstream
-	upstreamURL := fmt.Sprintf("https://%s%s", destination, req.URL.Path)
-	if req.URL.RawQuery != "" {
-		upstreamURL += "?" + req.URL.RawQuery
+	// Set the Host header if not already set
+	if req.Host == "" {
+		req.Host = destination
 	}
 
-	upstreamReq, err := http.NewRequest(req.Method, upstreamURL, req.Body)
-	if err != nil {
-		p.logger.Error("Failed to create upstream request: %v", err)
-		return
-	}
+	// Serve the request
+	proxy.ServeHTTP(writer, req)
 
-	// Copy original headers
-	for key, values := range req.Header {
-		upstreamReq.Header[key] = values
-	}
-
-	// Get headers to inject
-	headers, err := p.headerInjector.GetHeaders(serverName, identity)
-	if err != nil {
-		p.logger.Error("Failed to get headers: %v", err)
-		return
-	}
-
-	p.logger.Debug("Got %d headers to inject for server %q", len(headers), serverName)
-	
-	if p.config.InjectHeadersUpstream {
-		// Inject headers into upstream request
-		for key, value := range headers {
-			p.logger.Debug("Injecting header %q = %q", key, value)
-			upstreamReq.Header.Set(key, value)
-		}
-	}
-
-	// Log final request headers
-	p.logger.Debug("Final request headers:")
-	for key, values := range upstreamReq.Header {
-		p.logger.Debug("  %s: %v", key, values)
-	}
-
-	// Send request to upstream
-	resp, err := client.Do(upstreamReq)
-	if err != nil {
-		p.logger.Error("Failed to send request: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if p.config.InjectHeadersDownstream {
-		// Inject headers into downstream request by to client
-		for key, value := range headers {
-			p.logger.Debug("Injecting resp header %q = %q", key, value)
-			resp.Header.Set(key, value)
-		}	
-	}
-
-	p.logger.Debug("Got response: %d %s", resp.StatusCode, resp.Status)
-	p.logger.Debug("Response headers:")
-	for key, values := range resp.Header {
-		p.logger.Debug("  %s: %v", key, values)
-	}
-
-	// Write response back to client
-	err = resp.Write(conn)
-	if err != nil {
-		p.logger.Error("Failed to write response: %v", err)
-		return
-	}
-
-	p.logger.Debug("Successfully sent response")
+	p.logger.Debug("Successfully completed proxy request")
 }
 
 // handleTCPConnection handles direct TCP proxying with TLS termination
