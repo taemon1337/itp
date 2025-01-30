@@ -110,7 +110,7 @@ The `--inject-header` flag supports Go templates with these variables:
 
 Example:
 ```bash
-itp --inject-header 'backend=X-Viper-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}'
+itp --inject-header 'backend=X-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}'
 ```
 
 ### YAML Configuration
@@ -204,12 +204,12 @@ Example complex header template:
 headers:
   - upstream: "backend"
     headers:
-      X-Viper-User: "USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}};{{range .Auths}}AUTH:{{.}}{{end}}"
+      X-User: "USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}};{{range .Auths}}AUTH:{{.}}{{end}}"
 ```
 
 This would generate headers like:
 ```
-X-Viper-User: USER:admin@example.com;ROLE:admins;ROLE:eng-team;AUTH:read;AUTH:write
+X-User: USER:admin@example.com;ROLE:admins;ROLE:eng-team;AUTH:read;AUTH:write
 ```
 
 ### Inject HTTP headers

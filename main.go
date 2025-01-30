@@ -50,7 +50,7 @@ func main() {
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
 	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
 	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
-	injectHeaders := flag.String("inject-header", "", "Inject headers in format upstream=name=template[,upstream=name=template,...] (e.g. 'backend=X-Viper-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}')")
+	injectHeaders := flag.String("inject-header", "", "Inject headers in format upstream=name=template[,upstream=name=template,...] (e.g. 'backend=X-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}')")
 	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream requests")
 	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream responses")
 	addRole := flag.String("add-role", "", "Add roles in format field=value=role1,role2,... (e.g. 'cn=admin=admin,viewer')")
