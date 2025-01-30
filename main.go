@@ -27,6 +27,8 @@ func main() {
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
 	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
 	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
+	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream request by to client")
+	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream request by to client")
 
 	// Routing flags
 	routes := flag.String("route", "", "Static routes in format src=dest[,src=dest,...]")
@@ -95,6 +97,10 @@ func main() {
 		ExternalDomain:   *externalDomain,
 		AllowUnknownCerts: *allowUnknownClients,
 		ListenAddr:        *addr,
+
+		// control if headers should be injected
+		InjectHeadersUpstream:   *injectHeadersUpstream,
+		InjectHeadersDownstream: *injectHeadersDownstream,
 
 		// Echo server config
 		EchoName:         *echoName,

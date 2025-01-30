@@ -46,6 +46,9 @@ type Config struct {
 	AllowUnknownCerts bool
 	ListenAddr        string
 
+	InjectHeadersDownstream bool // Inject headers into downstream request by to client
+	InjectHeadersUpstream   bool // Inject headers into upstream request by to client
+
 	// Echo server config
 	EchoName         string // Name for the echo upstream (empty to disable)
 	EchoAddr         string // Address for echo upstream server
@@ -289,6 +292,7 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 	}
 
 	// Check if this is an HTTP connection that needs header injection
+	// note we handleHTTPConnection even if InjectHeadersUpstream|Downstream are false
 	if ok := p.headerInjector.HasHeaders(serverName, ident); ok {
 		p.handleHTTPConnection(conn, destination, serverName, ident)
 		return
@@ -425,10 +429,12 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverNa
 
 	p.logger.Debug("Got %d headers to inject for server %q", len(headers), serverName)
 	
-	// Inject headers
-	for key, value := range headers {
-		p.logger.Debug("Injecting header %q = %q", key, value)
-		upstreamReq.Header.Set(key, value)
+	if p.config.InjectHeadersUpstream {
+		// Inject headers into upstream request
+		for key, value := range headers {
+			p.logger.Debug("Injecting header %q = %q", key, value)
+			upstreamReq.Header.Set(key, value)
+		}
 	}
 
 	// Log final request headers
@@ -444,6 +450,14 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverNa
 		return
 	}
 	defer resp.Body.Close()
+
+	if p.config.InjectHeadersDownstream {
+		// Inject headers into downstream request by to client
+		for key, value := range headers {
+			p.logger.Debug("Injecting resp header %q = %q", key, value)
+			resp.Header.Set(key, value)
+		}	
+	}
 
 	p.logger.Debug("Got response: %d %s", resp.StatusCode, resp.Status)
 	p.logger.Debug("Response headers:")
@@ -693,7 +707,7 @@ func (p *Proxy) Translator() *identity.Translator {
 
 // AddStaticRoute adds a static route to the router
 func (p *Proxy) AddStaticRoute(src, dest string) {
-	if dest == "echo" {
+	if dest == p.config.EchoName {
 		dest = fmt.Sprintf("%s.%s", dest, p.config.InternalDomain)
 	}
 	p.router.AddStaticRoute(src, dest)
@@ -708,7 +722,7 @@ func (p *Proxy) AddRoutes(routes string) {
 			continue
 		}
 
-        if parts[0] == "echo" {
+        if parts[0] == p.config.EchoName {
             p.AddStaticRoute(fmt.Sprintf("%s.%s", parts[0], p.config.InternalDomain), parts[1]) // echo is a special case and will become echo.{internalDomain}
         } else {
 			p.AddStaticRoute(parts[0], parts[1])

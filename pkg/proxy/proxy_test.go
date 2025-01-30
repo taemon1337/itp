@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/itp/pkg/logger"
+	"github.com/itp/pkg/certstore"
 )
 
 const (
@@ -21,6 +22,7 @@ const (
 	testClientSNI = "test-client"
 	testServerSNI = "test-server"
 	testEchoSNI   = "test-upstream"
+	upstreamServerName = testEchoSNI + "." + testInternalDomain
 )
 
 // setupTestLoggers creates loggers for testing
@@ -128,6 +130,9 @@ func TestHandleConnection(t *testing.T) {
 		ServerName:            testServerSNI,
 		InternalDomain:        testInternalDomain,
 		ExternalDomain:        testExternalDomain,
+		CertOptions: certstore.CertificateOptions{
+			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -150,7 +155,7 @@ func TestHandleConnection(t *testing.T) {
 	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
 
 	// Add common headers
-	err = p.AddCommonHeader("cn", testClientSNI, "X-Client-CN")
+	err = p.AddCommonHeader("cn", upstreamServerName, "X-Client-CN")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -177,7 +182,7 @@ func TestHandleConnection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         testEchoSNI,
+		ServerName:         upstreamServerName,
 	}
 
 	// Create TLS connection
@@ -189,7 +194,7 @@ func TestHandleConnection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+testServerSNI, nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
@@ -215,6 +220,11 @@ func TestHeaderInjection(t *testing.T) {
 		KeyFile:               "auto",
 		CAFile:                "",
 		ServerName:            testServerSNI,
+		InternalDomain:        testInternalDomain,
+		ExternalDomain:        testExternalDomain,
+		CertOptions: certstore.CertificateOptions{
+			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -240,7 +250,7 @@ func TestHeaderInjection(t *testing.T) {
 	err = p.AddHeader(testEchoSNI, "X-Custom", "{{ .CommonName }}")
 	require.NoError(t, err)
 
-	err = p.AddCommonHeader("cn", testEchoSNI, "X-Common-CN")
+	err = p.AddCommonHeader("cn", upstreamServerName, "X-Common-CN")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -267,7 +277,7 @@ func TestHeaderInjection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         testEchoSNI,
+		ServerName:         upstreamServerName,
 	}
 
 	// Create TLS connection
@@ -279,7 +289,7 @@ func TestHeaderInjection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+testServerSNI, nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
@@ -306,6 +316,11 @@ func TestGroupHeaderInjection(t *testing.T) {
 		KeyFile:               "auto",
 		CAFile:                "",
 		ServerName:            testServerSNI,
+		InternalDomain:        testInternalDomain,
+		ExternalDomain:        testExternalDomain,
+		CertOptions: certstore.CertificateOptions{
+			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -330,8 +345,8 @@ func TestGroupHeaderInjection(t *testing.T) {
 	// Add group mapping - when CN is testClientSNI, assign TestGroup
 	p.Translator().AddGroupMapping("cn", testClientSNI, []string{"TestGroup"})
 
-	// Add group header injection
-	err = p.AddCommonHeader("groups", testEchoSNI, "X-Echo-Groups")
+	// Add group header injection (based on upstream SNI, i.e. app name)
+	err = p.AddCommonHeader("groups", upstreamServerName, "X-Echo-Groups")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -358,7 +373,7 @@ func TestGroupHeaderInjection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         testServerSNI,
+		ServerName:         upstreamServerName,
 	}
 
 	// Create TLS connection
@@ -370,7 +385,7 @@ func TestGroupHeaderInjection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+testServerSNI, nil)
+	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
