@@ -26,6 +26,7 @@ type HeaderMapping struct {
 type HeaderInjector struct {
 	mappings map[string][]HeaderTemplate
 	templates map[string]map[string]*template.Template
+	logger    *log.Logger
 }
 
 // NewHeaderInjector creates a new header injector
@@ -33,40 +34,52 @@ func NewHeaderInjector() *HeaderInjector {
 	return &HeaderInjector{
 		mappings: make(map[string][]HeaderTemplate),
 		templates: make(map[string]map[string]*template.Template),
+		logger:    log.Default(),
 	}
 }
 
 // AddHeader adds a header template for an upstream
 func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateStr string) error {
-	log.Printf("Adding header template for upstream %q: %s = %q", upstream, headerName, templateStr)
+	h.logger.Printf("Adding header template for upstream %q: %s = %q", upstream, headerName, templateStr)
 	
 	// Parse template
 	tmpl, err := template.New("header").Parse(templateStr)
 	if err != nil {
-		log.Printf("Failed to parse template: %v", err)
+		h.logger.Printf("Failed to parse template: %v", err)
 		return fmt.Errorf("failed to parse template: %v", err)
 	}
 
-	// Test template with empty identity to catch invalid fields
+	// Validate template with test identity that has non-empty slices
+	testIdentity := &identity.Identity{
+		CommonName:       "test",
+		Organization:     []string{"test-org"},
+		OrganizationUnit: []string{"test-ou"},
+		Locality:        []string{"test-locality"},
+		Country:         []string{"test-country"},
+		State:           []string{"test-state"},
+		Groups:          []string{"test-group"},
+		Roles:           []string{"test-role"},
+	}
+
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, &identity.Identity{}); err != nil {
-		log.Printf("Invalid template: %v", err)
+	if err := tmpl.Execute(&buf, testIdentity); err != nil {
+		h.logger.Printf("Invalid template: %v", err)
 		return fmt.Errorf("invalid template: %v", err)
 	}
 
-	// Store template
-	if h.templates[upstream] == nil {
+	// Initialize upstream templates map if needed
+	if _, ok := h.templates[upstream]; !ok {
 		h.templates[upstream] = make(map[string]*template.Template)
 	}
 	h.templates[upstream][headerName] = tmpl
-	log.Printf("Successfully added header template for %q", headerName)
+	h.logger.Printf("Successfully added header template for %q", headerName)
 
 	return nil
 }
 
 // AddCommonHeader adds a common header (groups, roles, etc) for an upstream
 func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string) error {
-	log.Printf("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
+	h.logger.Printf("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
 	
 	var template string
 	switch headerType {
@@ -81,52 +94,46 @@ func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string
 	case "ou":
 		template = "{{ range .OrganizationUnit }}{{ . }}{{ end }}"
 	default:
-		log.Printf("Unknown header type: %s", headerType)
+		h.logger.Printf("Unknown header type: %s", headerType)
 		return fmt.Errorf("unknown header type: %s", headerType)
 	}
 	
-	log.Printf("Using template: %q", template)
+	h.logger.Printf("Using template: %q", template)
 	return h.AddHeader(upstream, headerName, template)
 }
 
+func (h *HeaderInjector) HasHeaders(upstream string, identity *identity.Identity) bool {
+	_, ok := h.templates[upstream]
+	return ok
+}
+
 // GetHeaders returns the headers that should be injected for an upstream
-func (h *HeaderInjector) GetHeaders(upstream string, identities []*identity.Identity) map[string]string {
-	log.Printf("Getting headers for upstream %q with %d identities", upstream, len(identities))
-	
-	if len(identities) == 0 {
-		log.Printf("No identities provided, skipping header injection")
-		return map[string]string{}
-	}
+func (h *HeaderInjector) GetHeaders(upstream string, identity *identity.Identity) (map[string]string, error) {
+	h.logger.Printf("Getting headers for upstream %q with identity %+v", upstream, identity)
 
 	// Get templates for this upstream
 	templates, ok := h.templates[upstream]
 	if !ok {
-		log.Printf("No header templates found for upstream %q", upstream)
-		return map[string]string{}
+		h.logger.Printf("No header templates found for upstream %q", upstream)
+		return nil, nil
 	}
 
-	log.Printf("Found %d header templates for upstream %q", len(templates), upstream)
-	log.Printf("First identity: %+v", identities[0])
+	h.logger.Printf("Found %d header templates for upstream %q", len(templates), upstream)
 
-	// Execute templates with first identity
 	headers := make(map[string]string)
-	for name, tmpl := range templates {
-		log.Printf("Executing template for header %q: %v", name, tmpl.Name())
+	for header, tmpl := range templates {
+		h.logger.Printf("Executing template for header %q: %s", header, tmpl.Name())
 		var buf bytes.Buffer
-		if err := tmpl.Execute(&buf, identities[0]); err != nil {
-			log.Printf("Failed to execute template for header %s: %v", name, err)
+		if err := tmpl.Execute(&buf, identity); err != nil {
+			h.logger.Printf("Failed to execute template for header %q: %v", header, err)
 			continue
 		}
 		value := buf.String()
-		if value != "" && value != "[]" {
-			log.Printf("Setting header %q = %q", name, value)
-			headers[name] = value
-		} else {
-			log.Printf("Skipping empty or null header %q (value=%q)", name, value)
-		}
+		h.logger.Printf("Setting header %q = %q", header, value)
+		headers[header] = value
 	}
 
-	return headers
+	return headers, nil
 }
 
 // appendUnique appends strings that haven't been seen before

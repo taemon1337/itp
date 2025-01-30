@@ -128,51 +128,70 @@ func (e *TranslationError) Error() string {
 
 // Common translation error codes
 const (
-	ErrNoMappings         = "NO_IDENTITY_MAPPINGS"
+	ErrNoIdentityMappings = "NO_IDENTITY_MAPPINGS"
 	ErrUnrecognizedClient = "UNRECOGNIZED_CLIENT"
 )
 
 // TranslateIdentity translates a certificate's identity based on configured mappings
-func (t *Translator) TranslateIdentity(cert *x509.Certificate) ([]*Identity, error) {
-	t.logger.Debug("Translating identity for certificate CN=%q, O=%v, OU=%v",
-		cert.Subject.CommonName, cert.Subject.Organization, cert.Subject.OrganizationalUnit)
-
+func (t *Translator) TranslateIdentity(cert *x509.Certificate) (*Identity, error) {
 	if !t.autoMap && cert.Subject.CommonName == "" {
 		return nil, &TranslationError{
-			Code:    ErrUnrecognizedClient,
-			Message: "certificate has no CN and auto-mapping is disabled",
+			Code:    ErrNoIdentityMappings,
+			Message: fmt.Sprintf("no identity mappings found for certificate and auto-mapping is disabled:\n- Common Name: %q\n- Organization: %q\n", cert.Subject.CommonName, cert.Subject.Organization),
 		}
 	}
 
-	var mappedIdentity *Identity
-	var mappingSource string
-	var details strings.Builder
+	t.logger.Debug("Translating identity for certificate CN=%q, O=%v, OU=%v", cert.Subject.CommonName, cert.Subject.Organization, cert.Subject.OrganizationalUnit)
 
-	// First try to find explicit mappings
-	if !t.autoMap {
-		mappedIdentity, mappingSource = t.findMappedIdentities(cert)
-		if mappedIdentity != nil {
-			details.WriteString(fmt.Sprintf("Found mapping from %s\n", mappingSource))
+	// Try to find explicit mappings first
+	identity := &Identity{}
+	mappedIdentity, source := t.findMappedIdentities(cert)
+	if mappedIdentity != nil {
+		identity = mappedIdentity
+	} else if !t.autoMap {
+		return nil, &TranslationError{
+			Code:    ErrNoIdentityMappings,
+			Message: fmt.Sprintf("no identity mappings found for certificate and auto-mapping is disabled:\n- Common Name: %q\n- Organization: %q\n", cert.Subject.CommonName, cert.Subject.Organization),
 		}
 	}
 
-	// If no mappings found and auto-map is enabled, create identity from cert
-	if mappedIdentity == nil {
-		if !t.autoMap {
-			return nil, &TranslationError{
-				Code:    ErrNoMappings,
-				Message: fmt.Sprintf("no identity mappings found for certificate CN=%s", cert.Subject.CommonName),
-			}
+	// Auto-map any unmapped fields if enabled
+	if t.autoMap {
+		t.logger.Debug("Auto-mapping identity for certificate CN=%s", cert.Subject.CommonName)
+		autoMappedIdentity := t.autoMapIdentity(cert)
+		if identity.CommonName == "" {
+			identity.CommonName = autoMappedIdentity.CommonName
 		}
-		mappedIdentity = t.autoMapIdentity(cert)
-		details.WriteString("Using auto-mapped identity\n")
+		if len(identity.Organization) == 0 {
+			identity.Organization = autoMappedIdentity.Organization
+		}
+		if len(identity.OrganizationUnit) == 0 {
+			identity.OrganizationUnit = autoMappedIdentity.OrganizationUnit
+		}
+		if len(identity.Locality) == 0 {
+			identity.Locality = autoMappedIdentity.Locality
+		}
+		if len(identity.Country) == 0 {
+			identity.Country = []string{"US"} // Default to US if no country specified
+		}
+		if len(identity.State) == 0 {
+			identity.State = autoMappedIdentity.State
+		}
 	}
 
-	// Apply any role/group mappings
-	t.applyRoleAndGroupMappings(cert, []*Identity{mappedIdentity}, &details)
+	// Add any role mappings
+	identity.Roles = t.getRoleMappings(cert)
 
-	t.logger.Debug("Identity translation details:\n%s", details.String())
-	return []*Identity{mappedIdentity}, nil
+	// Add any group mappings
+	identity.Groups = t.getGroupMappings(cert)
+
+	t.logger.Debug("Identity translation details:")
+	if source != "" {
+		t.logger.Debug("Found mapping from %s", source)
+	} else {
+		t.logger.Debug("Using auto-mapped identity")
+	}
+	return identity, nil
 }
 
 // applyRoleAndGroupMappings applies role and group mappings to the identity based on certificate fields
@@ -246,73 +265,104 @@ func (t *Translator) normalizeFieldName(field string) string {
 	}
 }
 
-// findMappedIdentities looks for specific mappings for the certificate
+// findMappedIdentities looks for explicit mappings for the certificate fields
 func (t *Translator) findMappedIdentities(cert *x509.Certificate) (*Identity, string) {
-	t.logger.Debug("Looking for mapped identities for certificate CN=%s", cert.Subject.CommonName)
-	
 	identity := &Identity{}
-	var mappingSource string
+	var source string
 
-	// Check CN mappings
-	if mapped, ok := t.cnMappings[cert.Subject.CommonName]; ok {
-		t.logger.Debug("Found CN mapping: %s -> %s", cert.Subject.CommonName, mapped)
-		identity.CommonName = mapped
-		mappingSource = fmt.Sprintf("CN=%s", cert.Subject.CommonName)
-		return identity, mappingSource
+	// Check CN mapping
+	if cert.Subject.CommonName != "" {
+		if mapped, ok := t.cnMappings[cert.Subject.CommonName]; ok {
+			identity.CommonName = mapped
+			source = fmt.Sprintf("CN=%s", cert.Subject.CommonName)
+		}
 	}
 
 	// Check Organization mappings
-	for _, org := range cert.Subject.Organization {
-		if mapped, ok := t.orgMappings[org]; ok {
-			t.logger.Debug("Found Organization mapping: %s -> %s", org, mapped)
-			identity.Organization = []string{mapped}
-			mappingSource = fmt.Sprintf("O=%s", org)
-			return identity, mappingSource
+	if len(cert.Subject.Organization) > 0 {
+		mappedOrgs := make([]string, 0, len(cert.Subject.Organization))
+		for _, org := range cert.Subject.Organization {
+			if mapped, ok := t.orgMappings[org]; ok {
+				mappedOrgs = append(mappedOrgs, mapped)
+				if source == "" {
+					source = fmt.Sprintf("O=%s", org)
+				}
+			}
+		}
+		if len(mappedOrgs) > 0 {
+			identity.Organization = mappedOrgs
 		}
 	}
 
 	// Check OU mappings
-	for _, ou := range cert.Subject.OrganizationalUnit {
-		if mapped, ok := t.ouMappings[ou]; ok {
-			t.logger.Debug("Found OU mapping: %s -> %s", ou, mapped)
-			identity.OrganizationUnit = []string{mapped}
-			mappingSource = fmt.Sprintf("OU=%s", ou)
-			return identity, mappingSource
+	if len(cert.Subject.OrganizationalUnit) > 0 {
+		mappedOUs := make([]string, 0, len(cert.Subject.OrganizationalUnit))
+		for _, ou := range cert.Subject.OrganizationalUnit {
+			if mapped, ok := t.ouMappings[ou]; ok {
+				mappedOUs = append(mappedOUs, mapped)
+				if source == "" {
+					source = fmt.Sprintf("OU=%s", ou)
+				}
+			}
+		}
+		if len(mappedOUs) > 0 {
+			identity.OrganizationUnit = mappedOUs
 		}
 	}
 
 	// Check Locality mappings
-	for _, locality := range cert.Subject.Locality {
-		if mapped, ok := t.locMappings[locality]; ok {
-			t.logger.Debug("Found Locality mapping: %s -> %s", locality, mapped)
-			identity.Locality = []string{mapped}
-			mappingSource = fmt.Sprintf("L=%s", locality)
-			return identity, mappingSource
+	if len(cert.Subject.Locality) > 0 {
+		mappedLocalities := make([]string, 0, len(cert.Subject.Locality))
+		for _, l := range cert.Subject.Locality {
+			if mapped, ok := t.locMappings[l]; ok {
+				mappedLocalities = append(mappedLocalities, mapped)
+				if source == "" {
+					source = fmt.Sprintf("L=%s", l)
+				}
+			}
+		}
+		if len(mappedLocalities) > 0 {
+			identity.Locality = mappedLocalities
 		}
 	}
 
 	// Check Country mappings
-	for _, country := range cert.Subject.Country {
-		if mapped, ok := t.countryMappings[country]; ok {
-			t.logger.Debug("Found Country mapping: %s -> %s", country, mapped)
-			identity.Country = []string{mapped}
-			mappingSource = fmt.Sprintf("C=%s", country)
-			return identity, mappingSource
+	if len(cert.Subject.Country) > 0 {
+		mappedCountries := make([]string, 0, len(cert.Subject.Country))
+		for _, c := range cert.Subject.Country {
+			if mapped, ok := t.countryMappings[c]; ok {
+				mappedCountries = append(mappedCountries, mapped)
+				if source == "" {
+					source = fmt.Sprintf("C=%s", c)
+				}
+			}
+		}
+		if len(mappedCountries) > 0 {
+			identity.Country = mappedCountries
 		}
 	}
 
 	// Check State mappings
-	for _, state := range cert.Subject.Province {
-		if mapped, ok := t.stateMappings[state]; ok {
-			t.logger.Debug("Found State mapping: %s -> %s", state, mapped)
-			identity.State = []string{mapped}
-			mappingSource = fmt.Sprintf("ST=%s", state)
-			return identity, mappingSource
+	if len(cert.Subject.Province) > 0 {
+		mappedStates := make([]string, 0, len(cert.Subject.Province))
+		for _, st := range cert.Subject.Province {
+			if mapped, ok := t.stateMappings[st]; ok {
+				mappedStates = append(mappedStates, mapped)
+				if source == "" {
+					source = fmt.Sprintf("ST=%s", st)
+				}
+			}
+		}
+		if len(mappedStates) > 0 {
+			identity.State = mappedStates
 		}
 	}
 
-	t.logger.Debug("No explicit mappings found for certificate")
-	return nil, ""
+	if source == "" {
+		return nil, ""
+	}
+
+	return identity, source
 }
 
 // matchesSourceField checks if a certificate field matches the mapping condition
@@ -405,7 +455,7 @@ func formatQuotedArray(values []string) string {
 	return fmt.Sprintf("[%s]", strings.Join(quoted, ", "))
 }
 
-// GetSubjectFromIdentity creates a subject string from an identity
+// GetSubjectFromIdentity returns a formatted string of the identity's subject fields
 func (t *Translator) GetSubjectFromIdentity(identities []*Identity) string {
 	if len(identities) == 0 {
 		t.logger.Warn("No identities provided to GetSubjectFromIdentity")
@@ -413,28 +463,29 @@ func (t *Translator) GetSubjectFromIdentity(identities []*Identity) string {
 	}
 
 	identity := identities[0]
-	var parts []string
+	var fields []string
 
+	// Maintain consistent field order: CN, O, OU, L, ST, C
 	if identity.CommonName != "" {
-		parts = append(parts, fmt.Sprintf("CN=%s", identity.CommonName))
+		fields = append(fields, fmt.Sprintf("CN=%s", identity.CommonName))
 	}
 	if len(identity.Organization) > 0 {
-		parts = append(parts, fmt.Sprintf("O=%s", formatQuotedArray(identity.Organization)))
+		fields = append(fields, fmt.Sprintf("O=%s", identity.Organization[0]))
 	}
 	if len(identity.OrganizationUnit) > 0 {
-		parts = append(parts, fmt.Sprintf("OU=%s", formatQuotedArray(identity.OrganizationUnit)))
+		fields = append(fields, fmt.Sprintf("OU=%s", identity.OrganizationUnit[0]))
 	}
 	if len(identity.Locality) > 0 {
-		parts = append(parts, fmt.Sprintf("L=%s", formatQuotedArray(identity.Locality)))
-	}
-	if len(identity.Country) > 0 {
-		parts = append(parts, fmt.Sprintf("C=%s", formatQuotedArray(identity.Country)))
+		fields = append(fields, fmt.Sprintf("L=%s", identity.Locality[0]))
 	}
 	if len(identity.State) > 0 {
-		parts = append(parts, fmt.Sprintf("ST=%s", formatQuotedArray(identity.State)))
+		fields = append(fields, fmt.Sprintf("ST=%s", identity.State[0]))
+	}
+	if len(identity.Country) > 0 {
+		fields = append(fields, fmt.Sprintf("C=%s", identity.Country[0]))
 	}
 
-	subject := strings.Join(parts, ", ")
+	subject := strings.Join(fields, ", ")
 	t.logger.Debug("Generated subject string: %s", subject)
 	return subject
 }
@@ -452,4 +503,24 @@ func (t *Translator) autoMapIdentity(cert *x509.Certificate) *Identity {
 		Groups:           []string{},
 		Roles:            []string{},
 	}
+}
+
+func (t *Translator) getRoleMappings(cert *x509.Certificate) []string {
+	roles := make([]string, 0)
+	for _, mapping := range t.roleMappings {
+		if t.matchesSourceField(cert, mapping.SourceField, mapping.SourceValue) {
+			roles = append(roles, mapping.Roles...)
+		}
+	}
+	return roles
+}
+
+func (t *Translator) getGroupMappings(cert *x509.Certificate) []string {
+	groups := make([]string, 0)
+	for _, mapping := range t.groupMappings {
+		if t.matchesSourceField(cert, mapping.SourceField, mapping.SourceValue) {
+			groups = append(groups, mapping.Groups...)
+		}
+	}
+	return groups
 }

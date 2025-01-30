@@ -16,6 +16,8 @@ import (
 )
 
 const (
+	testInternalDomain = "internal.local"
+	testExternalDomain = "external.com"
 	testClientSNI = "test-client"
 	testServerSNI = "test-server"
 	testEchoSNI   = "test-upstream"
@@ -92,7 +94,7 @@ func TestGetDefaultSNI(t *testing.T) {
 
 func TestNew(t *testing.T) {
 	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
-	config := Config{
+	config := &Config{
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -119,10 +121,13 @@ func TestNew(t *testing.T) {
 func TestHandleConnection(t *testing.T) {
 	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
 	// Create test configuration
-	config := Config{
+	config := &Config{
 		CertFile:              "auto",
 		KeyFile:               "auto",
 		CAFile:                "",
+		ServerName:            testServerSNI,
+		InternalDomain:        testInternalDomain,
+		ExternalDomain:        testExternalDomain,
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -171,7 +176,7 @@ func TestHandleConnection(t *testing.T) {
 
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
-		InsecureSkipVerify: true,
+		RootCAs:            p.certStore.GetCertPool(),
 		ServerName:         testEchoSNI,
 	}
 
@@ -205,10 +210,11 @@ func TestHandleConnection(t *testing.T) {
 func TestHeaderInjection(t *testing.T) {
 	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
 	// Create test configuration
-	config := Config{
+	config := &Config{
 		CertFile:              "auto",
 		KeyFile:               "auto",
 		CAFile:                "",
+		ServerName:            testServerSNI,
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -260,7 +266,7 @@ func TestHeaderInjection(t *testing.T) {
 
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
-		InsecureSkipVerify: true,
+		RootCAs:            p.certStore.GetCertPool(),
 		ServerName:         testEchoSNI,
 	}
 
@@ -295,10 +301,11 @@ func TestHeaderInjection(t *testing.T) {
 func TestGroupHeaderInjection(t *testing.T) {
 	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
 	// Create test configuration
-	config := Config{
+	config := &Config{
 		CertFile:              "auto",
 		KeyFile:               "auto",
 		CAFile:                "",
+		ServerName:            testServerSNI,
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
@@ -350,8 +357,8 @@ func TestGroupHeaderInjection(t *testing.T) {
 
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
-		InsecureSkipVerify: true,
-		ServerName:         testEchoSNI,
+		RootCAs:            p.certStore.GetCertPool(),
+		ServerName:         testServerSNI,
 	}
 
 	// Create TLS connection

@@ -23,6 +23,7 @@ type CertificateOptions struct {
 	KeyUsage     x509.KeyUsage
 	ExtKeyUsage  []x509.ExtKeyUsage
 	IPAddresses  []net.IP // Optional: IP addresses to include as SANs
+	DNSNames     []string // Optional: DNS names to include as SANs
 }
 
 // StoreOptions contains options for creating a new certificate store
@@ -96,8 +97,8 @@ func NewGeneratedStore(opts StoreOptions) (*GeneratedStore, error) {
 			Subject: pkix.Name{
 				CommonName: opts.CommonName,
 			},
-			NotBefore:             time.Now().Add(-1 * time.Second),
-			NotAfter:              time.Now().Add(opts.TTL),
+			NotBefore:             time.Now().Add(-1 * time.Hour),
+			NotAfter:              time.Now().Add(opts.TTL + time.Minute),
 			KeyUsage:             x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 			BasicConstraintsValid: true,
 			IsCA:                 true,
@@ -143,8 +144,8 @@ func (s *GeneratedStore) generateCertificate(serverName string, opts Certificate
 		Subject: pkix.Name{
 			CommonName: serverName,
 		},
-		NotBefore:             time.Now().Add(-1 * time.Second),
-		NotAfter:              time.Now().Add(opts.TTL),
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(opts.TTL + time.Minute),
 		KeyUsage:             opts.KeyUsage,
 		ExtKeyUsage:          opts.ExtKeyUsage,
 		BasicConstraintsValid: true,
@@ -181,6 +182,9 @@ func (s *GeneratedStore) generateCertificate(serverName string, opts Certificate
 
 	// Add IP addresses from CertificateOptions
 	template.IPAddresses = append(template.IPAddresses, opts.IPAddresses...)
+
+	// Add DNS names from CertificateOptions
+	template.DNSNames = append(template.DNSNames, opts.DNSNames...)
 
 	// Create certificate
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, s.ca, &privKey.PublicKey, s.caKey)

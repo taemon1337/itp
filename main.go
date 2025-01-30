@@ -20,6 +20,9 @@ func main() {
 	caFile := flag.String("server-ca", "", "CA certificate file for server cert (only used with auto-generated certs)")
 	allowUnknownClients := flag.Bool("server-allow-unknown-client-certs", false, "Allow client certificates from unknown CAs")
 	mapAuto := flag.Bool("map-auto", false, "Automatically map client CN to upstream CN")
+	serverName := flag.String("server-name", "", "If generating server certificates, use this server name for TLS connection")
+	internalDomain := flag.String("internal-domain", "cluster.local", "Internal domain for inside/upstream connections (auto generated certs)")
+	externalDomain := flag.String("external-domain", "", "External domain for incoming connections, public domain")
 	addr := flag.String("addr", ":8443", "address for tls proxy server to listen on")
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
 	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
@@ -57,7 +60,7 @@ func main() {
 
 	// Logging flags
 	proxyLogLevel := flag.String("proxy-log-level", "INFO", "Log level for proxy component (ERROR, WARN, INFO, DEBUG)")
-	routerLogLevel := flag.String("router-log-level", "INFO", "Log level for router component (ERROR, WARN, INFO, DEBUG)")
+	routerLogLevel := flag.String("router-log-level", "DEBUG", "Log level for router component (ERROR, WARN, INFO, DEBUG)")
 	translatorLogLevel := flag.String("translator-log-level", "INFO", "Log level for translator component (ERROR, WARN, INFO, DEBUG)")
 	echoLogLevel := flag.String("echo-log-level", "INFO", "Log level for echo server component (ERROR, WARN, INFO, DEBUG)")
 
@@ -82,11 +85,14 @@ func main() {
 	}
 
 	// Create proxy configuration
-	config := proxy.Config{
+	config := &proxy.Config{
 		// Server TLS config
 		CertFile:          *certFile,
 		KeyFile:           *keyFile,
 		CAFile:           *caFile,
+		ServerName:       *serverName,
+		InternalDomain:   *internalDomain,
+		ExternalDomain:   *externalDomain,
 		AllowUnknownCerts: *allowUnknownClients,
 		ListenAddr:        *addr,
 

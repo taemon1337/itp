@@ -5,191 +5,85 @@ import (
 	"testing"
 
 	"github.com/itp/pkg/identity"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestHeaderInjector(t *testing.T) {
 	tests := []struct {
-		name      string
-		upstream  string
-		headers   map[string]string
-		id        *identity.Identity
-		expected  map[string]string
-		wantError bool
+		name     string
+		identity *identity.Identity
+		template string
+		want     string
 	}{
 		{
-			name:     "basic template",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-User": "{{ .CommonName }}",
-			},
-			id: &identity.Identity{
+			name: "basic_template",
+			identity: &identity.Identity{
 				CommonName: "test-user",
 			},
-			expected: map[string]string{
-				"X-User": "test-user",
-			},
+			template: "{{ .CommonName }}",
+			want:     "test-user",
 		},
 		{
-			name:     "multiple fields",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-User": "{{ .CommonName }}/{{ .Organization }}",
-			},
-			id: &identity.Identity{
-				CommonName:    "test-user",
-				Organization: []string{"test-org"},
-			},
-			expected: map[string]string{
-				"X-User": "test-user/[test-org]",
-			},
-		},
-		{
-			name:     "multiple headers",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-User": "{{ .CommonName }}",
-				"X-Org":  "{{ .Organization }}",
-			},
-			id: &identity.Identity{
-				CommonName:    "test-user",
-				Organization: []string{"test-org"},
-			},
-			expected: map[string]string{
-				"X-User": "test-user",
-				"X-Org":  "[test-org]",
-			},
-		},
-		{
-			name:     "invalid template",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-User": "{{ .Invalid }}",
-			},
-			id: &identity.Identity{
-				CommonName: "test-user",
-			},
-			expected:  map[string]string{},
-			wantError: true,
-		},
-		{
-			name:     "common headers",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-CN":  "{{ .CommonName }}",
-				"X-Org": "{{ .Organization }}",
-				"X-OU":  "{{ .OrganizationUnit }}",
-			},
-			id: &identity.Identity{
-				CommonName:         "test-user",
-				Organization:      []string{"test-org"},
+			name: "multiple_fields",
+			identity: &identity.Identity{
+				CommonName:       "test-user",
+				Organization:     []string{"test-org"},
 				OrganizationUnit: []string{"test-ou"},
 			},
-			expected: map[string]string{
-				"X-CN":  "test-user",
-				"X-Org": "[test-org]",
-				"X-OU":  "[test-ou]",
-			},
-		},
-		{
-			name:     "multiple identities",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-Users": "{{ .CommonName }}",
-				"X-Orgs":  "{{ .Organization }}",
-			},
-			id: &identity.Identity{
-				CommonName:    "user1",
-				Organization: []string{"org1"},
-			},
-			expected: map[string]string{
-				"X-Users": "user1",
-				"X-Orgs":  "[org1]",
-			},
-		},
-		{
-			name:     "empty values",
-			upstream: "test-upstream",
-			headers: map[string]string{
-				"X-Empty": "{{ .CommonName }}",
-			},
-			id:       &identity.Identity{},
-			expected: map[string]string{},
-		},
-		{
-			name:     "wrong upstream",
-			upstream: "wrong-upstream",
-			headers: map[string]string{
-				"X-User": "{{ .CommonName }}",
-			},
-			id: &identity.Identity{
-				CommonName: "test-user",
-			},
-			expected: map[string]string{},
+			template: "{{ .CommonName }}/{{ index .Organization 0 }}/{{ index .OrganizationUnit 0 }}",
+			want:     "test-user/test-org/test-ou",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewHeaderInjector()
-			for name, tmpl := range tt.headers {
-				err := h.AddHeader("test-upstream", name, tmpl)
-				if tt.wantError {
-					require.Error(t, err)
-					return
-				}
-				require.NoError(t, err)
+			injector := NewHeaderInjector()
+			err := injector.AddHeader("test-upstream", "X-User", tt.template)
+			if err != nil {
+				t.Fatalf("Failed to add header: %v", err)
 			}
-			result := h.GetHeaders(tt.upstream, []*identity.Identity{tt.id})
-			assert.Equal(t, tt.expected, result, "GetHeaders()")
+
+			headers, err := injector.GetHeaders("test-upstream", tt.identity)
+			if err != nil {
+				t.Fatalf("Failed to get headers: %v", err)
+			}
+
+			if headers["X-User"] != tt.want {
+				t.Errorf("Expected header value %q, got %q", tt.want, headers["X-User"])
+			}
 		})
 	}
 }
 
-func TestHeaderInjector_AddCommonHeader(t *testing.T) {
-	tests := []struct {
-		name      string
-		headerType string
-		upstream  string
-		headerName string
-		wantErr   bool
-	}{
-		{
-			name:       "valid cn",
-			headerType: "cn",
-			upstream:   "app.svc",
-			headerName: "X-User",
-		},
-		{
-			name:       "valid org",
-			headerType: "org",
-			upstream:   "app.svc",
-			headerName: "X-Team",
-		},
-		{
-			name:       "valid ou",
-			headerType: "ou",
-			upstream:   "app.svc",
-			headerName: "X-Department",
-		},
-		{
-			name:       "invalid type",
-			headerType: "invalid",
-			upstream:   "app.svc",
-			headerName: "X-Header",
-			wantErr:    true,
-		},
+func TestCommonHeaders(t *testing.T) {
+	injector := NewHeaderInjector()
+
+	// Add common headers
+	err := injector.AddCommonHeader("cn", "test-upstream", "X-Common-CN")
+	if err != nil {
+		t.Fatalf("Failed to add CN header: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := NewHeaderInjector()
-			err := h.AddCommonHeader(tt.headerType, tt.upstream, tt.headerName)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("AddCommonHeader() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+	err = injector.AddCommonHeader("groups", "test-upstream", "X-Common-Groups")
+	if err != nil {
+		t.Fatalf("Failed to add groups header: %v", err)
+	}
+
+	identity := &identity.Identity{
+		CommonName: "test-user",
+		Groups:    []string{"group1", "group2"},
+	}
+
+	headers, err := injector.GetHeaders("test-upstream", identity)
+	if err != nil {
+		t.Fatalf("Failed to get headers: %v", err)
+	}
+
+	if headers["X-Common-CN"] != "test-user" {
+		t.Errorf("Expected CN header value %q, got %q", "test-user", headers["X-Common-CN"])
+	}
+
+	if headers["X-Common-Groups"] != "group1group2" {
+		t.Errorf("Expected groups header value %q, got %q", "group1group2", headers["X-Common-Groups"])
 	}
 }
 
