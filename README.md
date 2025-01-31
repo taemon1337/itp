@@ -15,13 +15,99 @@ ITP is a high-performance mTLS proxy that translates identities between differen
 - **Real-time Echo Server**: Built-in echo server for debugging TLS connections
 - **High Performance**: Written in Go for optimal performance and minimal resource usage
 
+## How It Works
+
+```
+External Domain                    ITP Proxy                     Internal Domain
+(external.com)                                                  (cluster.local)
+                                ┌──────────────┐
+                                │   Identity   │
+                                │ Translation  │
+                                │    Proxy     │
+                                └──────────────┘
+    ┌──────┐     1. mTLS          ┌──────┐     3. mTLS          ┌──────────┐
+    │Client├────Connection────────┤ ITP  ├─────Connection───────┤ Backend  │
+    └──────┘                      └──────┘                      └──────────┘
+      │                              │                               │
+      │                              │                               │
+      │   CN: user@external.com      │     CN: user                  │
+      │   O: ExternalOrg             │     O: Internal               │
+      │   OU: DevTeam                │     OU: Engineering           │
+      │                              │                               │
+      │                        2. Translation                        │
+      │                        ───────────────►                      │
+      │                        - Map CN, O, OU                       │
+      │                        - Add Roles                           │
+      │                        - Add Auth                            │
+      │                        - Inject Headers                      │
+      │                                                              │
+      │                                                              │
+      │                     4. Headers Injected                      │
+      │                        X-User: user                          │
+      │                        X-Roles: developer                    │
+      │                        X-Auth: read,write                    │
+      │                                                              │
+
+Features:
+• Secure mTLS on both sides
+• Certificate field mapping (CN, O, OU)
+• Role-based access control
+• Header injection
+• Domain translation
+• Automatic routing
+```
+
 ## Installation
+
+### Using Go
 
 ```bash
 go install github.com/taemon1337/itp@latest
 ```
 
-Or build from source:
+### Using Docker
+
+ITP provides two Docker image variants optimized for different use cases:
+
+1. **Distroless variant** (Recommended for Production)
+   ```bash
+   docker pull taemon1337/itp:latest-distroless
+   ```
+   - Minimal attack surface
+   - Smaller image size
+   - Based on Google's distroless base image
+   - No shell or debugging tools
+
+2. **Alpine variant** (Recommended for Development/Debugging)
+   ```bash
+   docker pull taemon1337/itp:latest-alpine
+   ```
+   - Includes basic debugging tools
+   - Shell access available
+   - Based on Alpine Linux
+
+#### Building Docker Images
+
+Build both variants:
+```bash
+make docker-build
+```
+
+Build specific variant:
+```bash
+# Build distroless variant
+make docker-build-distroless
+
+# Build alpine variant
+make docker-build-alpine
+```
+
+You can also specify version and other build arguments:
+```bash
+VERSION=2.0.0 make docker-build
+```
+
+### Building from Source
 
 ```bash
 git clone https://github.com/taemon1337/itp.git

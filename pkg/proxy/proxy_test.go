@@ -132,14 +132,17 @@ func TestHandleConnection(t *testing.T) {
 		ExternalDomain:        testExternalDomain,
 		CertOptions: certstore.CertificateOptions{
 			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
 		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
 		AllowUnknownCerts:     true,
-		AutoMapCN:             true, // Enable auto mapping
+		AutoMapCN:             true,
+		InjectHeadersUpstream: true,   // Enable header injection
+		InjectHeadersDownstream: true,  // Enable header injection for responses
 		ListenAddr:            "127.0.0.1:8443",
-		EchoName:              testEchoSNI, // Use echo server as the upstream
+		EchoName:              testEchoSNI,
 		EchoAddr:              "127.0.0.1:9443",
 		ProxyLogger:          proxyLogger,
 		RouterLogger:         routerLogger,
@@ -154,8 +157,8 @@ func TestHandleConnection(t *testing.T) {
 	// Add static route for echo server
 	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
 
-	// Add common headers
-	err = p.AddCommonHeader("cn", upstreamServerName, "X-Client-CN")
+	// Add header template for client CN
+	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Client-CN", "{{ .CommonName }}")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -166,7 +169,7 @@ func TestHandleConnection(t *testing.T) {
 		}
 	}()
 
-	// Wait for both proxy and echo server to be ready
+	// Wait for both servers to be ready
 	require.NoError(t, waitForServer(t, config.ListenAddr))
 	require.NoError(t, waitForServer(t, config.EchoAddr))
 
@@ -182,7 +185,8 @@ func TestHandleConnection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         upstreamServerName,
+		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
+		InsecureSkipVerify: true,  // For testing only
 	}
 
 	// Create TLS connection
@@ -194,7 +198,7 @@ func TestHandleConnection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
@@ -205,10 +209,8 @@ func TestHandleConnection(t *testing.T) {
 	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), nil)
 	require.NoError(t, err)
 
-	// Check status code
+	// Check response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Check headers
 	assert.Equal(t, testClientSNI, resp.Header.Get("X-Client-CN"))
 }
 
@@ -224,12 +226,15 @@ func TestHeaderInjection(t *testing.T) {
 		ExternalDomain:        testExternalDomain,
 		CertOptions: certstore.CertificateOptions{
 			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
 		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
 		AllowUnknownCerts:     true,
 		AutoMapCN:             true,
+		InjectHeadersUpstream: true,   // Enable header injection
+		InjectHeadersDownstream: true,  // Enable header injection for responses
 		ListenAddr:            "127.0.0.1:8444",
 		EchoName:              testEchoSNI,
 		EchoAddr:              "127.0.0.1:9444",
@@ -246,11 +251,22 @@ func TestHeaderInjection(t *testing.T) {
 	// Add static route for echo server
 	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
 
-	// Add header templates
-	err = p.AddHeader(testEchoSNI, "X-Custom", "{{ .CommonName }}")
+	// Add identity mappings for testing
+	p.translator.AddMapping("cn", testClientSNI, "mapped-user")
+	p.translator.AddRoleMapping("cn", testClientSNI, []string{"developer"})
+	p.translator.AddGroupMapping("cn", testClientSNI, []string{"dev-team"})
+
+	// Add header templates with more test cases
+	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Custom", "{{ .CommonName }}")
 	require.NoError(t, err)
 
-	err = p.AddCommonHeader("cn", upstreamServerName, "X-Common-CN")
+	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Groups", "{{ range .Groups }}{{.}},{{end}}")
+	require.NoError(t, err)
+
+	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Roles", "{{ range .Roles }}{{.}},{{end}}")
+	require.NoError(t, err)
+
+	err = p.AddCommonHeader("cn", fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Common-CN")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -277,7 +293,8 @@ func TestHeaderInjection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         upstreamServerName,
+		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
+		InsecureSkipVerify: true,  // For testing only
 	}
 
 	// Create TLS connection
@@ -289,7 +306,7 @@ func TestHeaderInjection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
@@ -304,8 +321,10 @@ func TestHeaderInjection(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Check headers were properly injected
-	assert.Equal(t, testClientSNI, resp.Header.Get("X-Custom"))
-	assert.Equal(t, testClientSNI, resp.Header.Get("X-Common-CN"))
+	assert.Equal(t, "mapped-user", resp.Header.Get("X-Custom"), "Custom header should contain mapped CommonName")
+	assert.Equal(t, "dev-team,", resp.Header.Get("X-Groups"), "Groups header should contain mapped groups")
+	assert.Equal(t, "developer,", resp.Header.Get("X-Roles"), "Roles header should contain mapped roles")
+	assert.Equal(t, "mapped-user", resp.Header.Get("X-Common-CN"), "Common CN header should contain mapped CommonName")
 }
 
 func TestGroupHeaderInjection(t *testing.T) {
@@ -320,12 +339,15 @@ func TestGroupHeaderInjection(t *testing.T) {
 		ExternalDomain:        testExternalDomain,
 		CertOptions: certstore.CertificateOptions{
 			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
+			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
 		},
 		CertStoreType:         "auto",
 		CertStoreTTL:          24 * time.Hour,
 		CertStoreCacheDuration: time.Hour,
 		AllowUnknownCerts:     true,
 		AutoMapCN:             true,
+		InjectHeadersUpstream: true,   // Enable header injection
+		InjectHeadersDownstream: true,  // Enable header injection for responses
 		ListenAddr:            "127.0.0.1:8445",
 		EchoName:              testEchoSNI,
 		EchoAddr:              "127.0.0.1:9445",
@@ -342,11 +364,11 @@ func TestGroupHeaderInjection(t *testing.T) {
 	// Add static route for echo server
 	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
 
-	// Add group mapping - when CN is testClientSNI, assign TestGroup
-	p.Translator().AddGroupMapping("cn", testClientSNI, []string{"TestGroup"})
+	// Add group mapping for test client
+	p.translator.AddGroupMapping("cn", testClientSNI, []string{"TestGroup"})
 
-	// Add group header injection (based on upstream SNI, i.e. app name)
-	err = p.AddCommonHeader("groups", upstreamServerName, "X-Echo-Groups")
+	// Add header template for groups
+	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Echo-Groups", "{{ range .Groups }}{{ . }}{{ end }}")
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -373,7 +395,8 @@ func TestGroupHeaderInjection(t *testing.T) {
 	clientTLSConfig := &tls.Config{
 		Certificates:       []tls.Certificate{*clientCert},
 		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         upstreamServerName,
+		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
+		InsecureSkipVerify: true,  // For testing only
 	}
 
 	// Create TLS connection
@@ -385,7 +408,7 @@ func TestGroupHeaderInjection(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write test request
-	req, err := http.NewRequest(http.MethodGet, "https://"+upstreamServerName, nil)
+	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
 	require.NoError(t, err)
 
 	err = req.Write(clientTLSConn)
@@ -398,8 +421,6 @@ func TestGroupHeaderInjection(t *testing.T) {
 
 	// Check response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Check that groups were properly injected
 	assert.Equal(t, "TestGroup", resp.Header.Get("X-Echo-Groups"))
 }
 

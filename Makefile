@@ -1,7 +1,9 @@
 # Build variables
 BINARY_NAME=itp
-DOCKER_IMAGE=itp
+DOCKER_IMAGE=taemon1337/itp
 VERSION?=1.0.0
+BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+COMMIT_SHA?=$(shell git rev-parse --short HEAD)
 DOCKER_BUILD_IMAGE=golang:1.23-alpine
 DOCKER_LINT_IMAGE=golangci/golangci-lint:v1.63.4
 
@@ -105,14 +107,40 @@ build: ## Build binary using Docker
 		$(DOCKER_BUILD_IMAGE) sh -c "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) -ldflags='-w -s -X main.version=$(VERSION)' ."
 
 .PHONY: docker-build
-docker-build: ## Build Docker image
-	docker build -t $(DOCKER_IMAGE):$(VERSION) .
-	docker tag $(DOCKER_IMAGE):$(VERSION) $(DOCKER_IMAGE):latest
+docker-build: docker-build-distroless docker-build-alpine ## Build all Docker images
+
+.PHONY: docker-build-distroless
+docker-build-distroless: ## Build Distroless Docker image
+	docker build --target distroless \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		--build-arg COMMIT_SHA=$(COMMIT_SHA) \
+		-t $(DOCKER_IMAGE):$(VERSION)-distroless \
+		-t $(DOCKER_IMAGE):latest-distroless \
+		.
+
+.PHONY: docker-build-alpine
+docker-build-alpine: ## Build Alpine Docker image
+	docker build --target alpine \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		--build-arg COMMIT_SHA=$(COMMIT_SHA) \
+		-t $(DOCKER_IMAGE):$(VERSION)-alpine \
+		-t $(DOCKER_IMAGE):latest-alpine \
+		.
 
 .PHONY: docker-push
-docker-push: ## Push Docker image
-	docker push $(DOCKER_IMAGE):$(VERSION)
-	docker push $(DOCKER_IMAGE):latest
+docker-push: docker-push-distroless docker-push-alpine ## Push all Docker images
+
+.PHONY: docker-push-distroless
+docker-push-distroless: ## Push Distroless Docker image
+	docker push $(DOCKER_IMAGE):$(VERSION)-distroless
+	docker push $(DOCKER_IMAGE):latest-distroless
+
+.PHONY: docker-push-alpine
+docker-push-alpine: ## Push Alpine Docker image
+	docker push $(DOCKER_IMAGE):$(VERSION)-alpine
+	docker push $(DOCKER_IMAGE):latest-alpine
 
 .PHONY: run
 run: ## Run the application in Docker
