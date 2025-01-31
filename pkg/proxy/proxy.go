@@ -44,6 +44,7 @@ type Config struct {
 	InternalDomain    string
 	ExternalDomain    string
 	CertOptions       certstore.CertificateOptions
+	EchoCertOptions   certstore.CertificateOptions
 	AllowUnknownCerts bool
 	ListenAddr        string
 
@@ -616,10 +617,7 @@ func (p *Proxy) setupEchoServer(config *Config) error {
 	}
 
 	// Get certificate from store using the provided echo name
-	echoServerCert, err := p.certStore.GetCertificateWithOptions(context.Background(), config.EchoName, certstore.CertificateOptions{
-		CommonName: config.EchoName,
-		DNSNames:   []string{"localhost", config.EchoName},
-	})
+	echoServerCert, err := p.certStore.GetCertificateWithOptions(context.Background(), config.EchoName, config.EchoCertOptions)
 	if err != nil {
 		return fmt.Errorf("failed to get echo server certificate: %v", err)
 	}

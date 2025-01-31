@@ -9,6 +9,7 @@ import (
 
 	"github.com/itp/pkg/logger"
 	"github.com/itp/pkg/proxy"
+	"github.com/itp/pkg/certstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,6 +51,8 @@ func main() {
 	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
 	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
 	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
+	echoSAN := flag.String("echo-san", "", "Additional DNS names for echo server certificate (comma-separated)")
+	serverSAN := flag.String("server-san", "", "Additional DNS names for server certificate (comma-separated)")
 	injectHeaders := flag.String("inject-header", "", "Inject headers in format upstream=name=template[,upstream=name=template,...] (e.g. 'backend=X-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}')")
 	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream requests")
 	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream responses")
@@ -84,6 +87,13 @@ func main() {
 		EchoLogger:      logger.New("echo", logger.LevelInfo),
 		InjectHeadersUpstream: *injectHeadersUpstream,
 		InjectHeadersDownstream: *injectHeadersDownstream,
+		CertOptions: certstore.CertificateOptions{
+			DNSNames: append([]string{*serverName}, strings.Split(*serverSAN, ",")...),
+		},
+		EchoCertOptions: certstore.CertificateOptions{
+			CommonName: *echoName,
+			DNSNames:   append([]string{"localhost", *echoName}, strings.Split(*echoSAN, ",")...),
+		},
 	}
 
 	// Create proxy instance
