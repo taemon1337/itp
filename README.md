@@ -109,13 +109,45 @@ itp --server-cert /path/to/cert.pem \
 
 ## Configuration
 
-### TLS Configuration
+## CLI Configuration
 
+### Required Flags
+| Flag | Description | Default |
+|------|-------------|---------||
+| `--server-name` | Server name for the proxy | Required |
+| `--external-domain` | External domain for connections | Required |
+| `--internal-domain` | Internal domain for connections | Required |
+
+### Network Configuration
+| Flag | Description | Default |
+|------|-------------|---------||
+| `--listen` | Address to listen on | `:8443` |
+| `--echo-name` | Name for the echo server | `echo.<internal-domain>` |
+| `--echo-addr` | Address for the echo server | `:8444` |
+| `--routes` | Comma-separated list of routes (e.g., `localhost=echo,app=app.internal`) | `""` |
+
+### TLS Configuration
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--server-cert` | Server certificate file (empty for auto-generated) | `""` |
-| `--server-key` | Server key file (empty for auto-generated) | `""` |
-| `--server-ca` | CA certificate file for server cert | `""` |
+| `--cert` | Path to certificate file | `""` |
+| `--key` | Path to private key file | `""` |
+| `--ca` | Path to CA certificate file | `""` |
+
+### Security Configuration
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--allow-unknown-certs` | Allow unknown client certificates | `false` |
+| `--route-via-dns` | Enable DNS-based routing | `false` |
+| `--auto-map-cn` | Automatically map CommonName | `true` |
+
+### Header Injection
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--inject-headers-upstream` | Inject headers upstream | `true` |
+| `--inject-headers-downstream` | Inject headers downstream | `false` |
+| `--inject-header` | Header template (e.g., `localhost=X-User={{.CommonName}}`) | `""` |
+| `--add-role` | Role mapping (e.g., `cn=admin=admin-role`) | `""` |
+| `--add-auth` | Auth mapping (e.g., `cn=*=read,write`) | `""` |
 | `--server-name` | Server name for TLS connection | `proxy.test` |
 | `--server-san` | Additional DNS names for server certificate (comma-separated) | `""` |
 | `--server-allow-unknown-client-certs` | Allow client certificates from unknown CAs | `false` |
@@ -124,15 +156,25 @@ itp --server-cert /path/to/cert.pem \
 
 ### Certificate Generation
 
-When `--server-cert` is empty, ITP will automatically generate certificates:
+When no certificate files are provided (`--cert`, `--key`, `--ca`), ITP will automatically generate certificates:
 - Server certificate for external connections (proxy's public interface)
 - Internal certificates for client authentication and upstream connections
 - All certificates include appropriate SANs based on domains and server names
 
-When `--server-cert` is provided:
+When certificate files are provided:
 - Uses the specified certificate files for both server and client connections
 - CA certificate is required for client certificate verification
 - Certificate must be valid for the specified `--server-name`
+
+### Template Functions
+
+When injecting headers, you can use these template functions:
+
+| Function | Description | Example |
+|----------|-------------|---------||
+| `join` | Join slice with custom separator | `{{ .Groups \| join "; " }}` |
+| `comma` | Join slice with commas | `{{ .Groups \| comma }}` |
+| `space` | Join slice with spaces | `{{ .Groups \| space }}` |
 
 ### Echo Server Configuration
 
