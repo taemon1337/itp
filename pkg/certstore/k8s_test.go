@@ -22,8 +22,8 @@ func TestNewK8sStore(t *testing.T) {
 	cmClient := cmfake.NewSimpleClientset()
 
 	store := NewK8sStore(K8sOptions{
-		Options: Options{
-			DefaultTTL:    time.Hour,
+		StoreOptions: StoreOptions{
+			DefaultTTL: time.Hour,
 			CacheDuration: time.Minute,
 		},
 		Namespace:   "test-ns",
@@ -70,8 +70,8 @@ func TestMinimalCertStore(t *testing.T) {
 		})
 
 	store := NewK8sStore(K8sOptions{
-		Options: Options{
-			DefaultTTL:    time.Hour,
+		StoreOptions: StoreOptions{
+			DefaultTTL: time.Hour,
 			CacheDuration: time.Minute,
 		},
 		Namespace:   "test-ns",

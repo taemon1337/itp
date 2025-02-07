@@ -16,28 +16,28 @@ import (
 
 // ConnectionInfo contains details about the TLS connection
 type ConnectionInfo struct {
-	RemoteAddr    string   `json:"remote_addr"`
-	LocalAddr     string   `json:"local_addr"`
-	TLS           TLSInfo  `json:"tls"`
-	Route         RouteInfo `json:"route"`
+	RemoteAddr string    `json:"remote_addr"`
+	LocalAddr  string    `json:"local_addr"`
+	TLS        TLSInfo   `json:"tls"`
+	Route      RouteInfo `json:"route"`
 }
 
 // TLSInfo contains TLS-specific connection details
 type TLSInfo struct {
-	Version               string   `json:"version"`
-	CipherSuite          string   `json:"cipher_suite"`
-	ServerName           string   `json:"server_name"`
-	NegotiatedProtocol   string   `json:"negotiated_protocol"`
-	ClientCertProvided   bool     `json:"client_cert_provided"`
-	ClientCertSubject    string   `json:"client_cert_subject,omitempty"`
-	ClientCertIssuer     string   `json:"client_cert_issuer,omitempty"`
-	ClientCertNotBefore  string   `json:"client_cert_not_before,omitempty"`
-	ClientCertNotAfter   string   `json:"client_cert_not_after,omitempty"`
+	Version             string `json:"version"`
+	CipherSuite         string `json:"cipher_suite"`
+	ServerName          string `json:"server_name"`
+	NegotiatedProtocol  string `json:"negotiated_protocol"`
+	ClientCertProvided  bool   `json:"client_cert_provided"`
+	ClientCertSubject   string `json:"client_cert_subject,omitempty"`
+	ClientCertIssuer    string `json:"client_cert_issuer,omitempty"`
+	ClientCertNotBefore string `json:"client_cert_not_before,omitempty"`
+	ClientCertNotAfter  string `json:"client_cert_not_after,omitempty"`
 }
 
 // RouteInfo contains routing details
 type RouteInfo struct {
-	UpstreamName string `json:"upstream_name"`
+	UpstreamName string      `json:"upstream_name"`
 	Request      RequestInfo `json:"request"`
 }
 
@@ -69,7 +69,7 @@ func New(cert *tls.Certificate, ca *x509.CertPool, name string) *Server {
 func (s *Server) Start(addr string) error {
 	config := &tls.Config{
 		Certificates: []tls.Certificate{*s.cert},
-		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    s.ca,
 		RootCAs:      s.ca,
 	}
@@ -164,7 +164,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		RemoteAddr: conn.RemoteAddr().String(),
 		LocalAddr:  conn.LocalAddr().String(),
 		TLS: TLSInfo{
-			Version:             getTLSVersion(state.Version),
+			Version:            getTLSVersion(state.Version),
 			CipherSuite:        getCipherSuiteName(state.CipherSuite),
 			ServerName:         state.ServerName,
 			NegotiatedProtocol: state.NegotiatedProtocol,

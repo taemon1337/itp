@@ -10,54 +10,11 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"strings"
 	"sync"
 	"time"
 )
 
-// CertificateOptions contains options for creating a certificate
-type CertificateOptions struct {
-	CommonName    string
-	TTL          time.Duration
-	CacheDuration time.Duration
-	KeyUsage     x509.KeyUsage
-	ExtKeyUsage  []x509.ExtKeyUsage
-	IPAddresses  []net.IP // Optional: IP addresses to include as SANs
-	DNSNames     []string // Optional: DNS names to include as SANs
-}
 
-// StoreOptions contains options for creating a new certificate store
-type StoreOptions struct {
-	CommonName    string
-	TTL          time.Duration
-	KeyUsage     x509.KeyUsage
-	ExtKeyUsage  []x509.ExtKeyUsage
-	CAKey        *rsa.PrivateKey  // Optional: existing CA private key
-	CACert       *x509.Certificate // Optional: existing CA certificate
-	CacheDuration time.Duration
-}
-
-// DefaultCertificateOptions returns the default options for certificate generation
-func DefaultCertificateOptions() CertificateOptions {
-	return CertificateOptions{
-		CommonName:    "Default CA",
-		TTL:          24 * time.Hour,
-		CacheDuration: time.Hour,
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-	}
-}
-
-// DefaultStoreOptions returns the default options for creating a new certificate store
-func DefaultStoreOptions() StoreOptions {
-	return StoreOptions{
-		CommonName:    "Default CA",
-		TTL:          24 * time.Hour,
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		CacheDuration: time.Hour,
-	}
-}
 
 // GeneratedStore is a certificate store that generates certificates on demand
 type GeneratedStore struct {
@@ -65,67 +22,91 @@ type GeneratedStore struct {
 	cache         map[string]*tls.Certificate
 	ca            *x509.Certificate
 	caKey         *rsa.PrivateKey
-	defaultOpts   StoreOptions
+	options      *StoreOptions
 	cacheDuration time.Duration
 }
 
 // NewGeneratedStore creates a new store for auto-generated certificates
-func NewGeneratedStore(opts StoreOptions) (*GeneratedStore, error) {
+func NewGeneratedStore(options *StoreOptions) (*GeneratedStore, error) {
+	if options == nil {
+		return nil, fmt.Errorf("options is required")
+	}
+
+	s := &GeneratedStore{
+		cache:         make(map[string]*tls.Certificate),
+		options:       options,
+		cacheDuration: options.CacheDuration,
+	}
+
+	// Generate or use provided CA
+	if err := s.generateCA(); err != nil {
+		return nil, fmt.Errorf("failed to generate CA: %v", err)
+	}
+
+	return s, nil
+}
+
+func (s *GeneratedStore) generateCA() error {
 	var caKey *rsa.PrivateKey
 	var caCert *x509.Certificate
 	var err error
 
-	if opts.CAKey != nil && opts.CACert != nil {
-		caKey = opts.CAKey
-		caCert = opts.CACert
+	// Use provided CA if available
+	if s.options.CAKey != nil && s.options.CACert != nil {
+		caKey = s.options.CAKey
+		caCert = s.options.CACert
 	} else {
 		// Generate CA key
 		caKey, err = rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate CA key: %v", err)
+			return fmt.Errorf("failed to generate CA private key: %v", err)
 		}
 
-		// Generate CA cert
+		// Prepare CA certificate template
 		serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 		serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate serial number: %v", err)
+			return fmt.Errorf("failed to generate serial number: %v", err)
 		}
 
 		template := &x509.Certificate{
 			SerialNumber: serialNumber,
 			Subject: pkix.Name{
-				CommonName: opts.CommonName,
+				CommonName: s.options.CommonName,
 			},
+			// Set validity period with small backdating for clock skew
 			NotBefore:             time.Now().Add(-1 * time.Hour),
-			NotAfter:              time.Now().Add(opts.TTL + time.Minute),
-			KeyUsage:             x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			NotAfter:              time.Now().Add(s.options.DefaultTTL),
+			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 			BasicConstraintsValid: true,
-			IsCA:                 true,
-			MaxPathLen:           1,
+			IsCA:                  true,
+			MaxPathLen:            1,
 		}
 
+		// Create CA certificate
 		caCertDER, err := x509.CreateCertificate(rand.Reader, template, template, &caKey.PublicKey, caKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create CA certificate: %v", err)
+			return fmt.Errorf("failed to create CA certificate: %v", err)
 		}
 
 		caCert, err = x509.ParseCertificate(caCertDER)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse CA certificate: %v", err)
+			return fmt.Errorf("failed to parse CA certificate: %v", err)
 		}
 	}
 
-	return &GeneratedStore{
-		cache:         make(map[string]*tls.Certificate),
-		ca:            caCert,
-		caKey:         caKey,
-		defaultOpts:   opts,
-		cacheDuration: opts.CacheDuration,
-	}, nil
+	s.caKey = caKey
+	s.ca = caCert
+	return nil
 }
 
-func (s *GeneratedStore) generateCertificate(serverName string, opts CertificateOptions) (*tls.Certificate, error) {
+func (s *GeneratedStore) generateCertificate(serverName string, opts *CertificateOptions) (*tls.Certificate, error) {
+	// Use default options if none provided
+	if opts == nil {
+		defaultOpts := NewCertificateOptions(serverName, s.options.DefaultTTL)
+		opts = &defaultOpts
+	}
+
 	// Generate key
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -139,52 +120,66 @@ func (s *GeneratedStore) generateCertificate(serverName string, opts Certificate
 		return nil, fmt.Errorf("failed to generate serial number: %v", err)
 	}
 
+	// Compute certificate validity period
+	now := time.Now()
+	ttl := opts.TTL
+	if ttl == 0 {
+		ttl = s.options.DefaultTTL
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName: serverName,
 		},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(opts.TTL + time.Minute),
-		KeyUsage:             opts.KeyUsage,
-		ExtKeyUsage:          opts.ExtKeyUsage,
+		NotBefore:             now.Add(-1 * time.Hour), // Small backdating for clock skew
+		NotAfter:              now.Add(ttl),
+		KeyUsage:              opts.KeyUsage,
+		ExtKeyUsage:           opts.ExtKeyUsage,
 		BasicConstraintsValid: true,
 	}
 
-	// Add appropriate SANs
-	host := serverName
-	if strings.Contains(serverName, ":") {
-		var err error
-		host, _, err = net.SplitHostPort(serverName)
-		if err != nil {
-			// If SplitHostPort fails, use the full serverName
-			host = serverName
+	// Set IP addresses and DNS names from CertificateOptions
+	template.IPAddresses = opts.IPAddresses
+	template.DNSNames = opts.DNSNames
+
+	// If no DNS names were provided, use the serverName as a fallback
+	if len(template.DNSNames) == 0 {
+		template.DNSNames = []string{serverName}
+	}
+
+	// For localhost/127.0.0.1, always add both
+	if serverName == "localhost" || serverName == "127.0.0.1" || serverName == "::1" {
+		// Add localhost to DNS names if not already present
+		haveLocalhost := false
+		for _, name := range template.DNSNames {
+			if name == "localhost" {
+				haveLocalhost = true
+				break
+			}
+		}
+		if !haveLocalhost {
+			template.DNSNames = append(template.DNSNames, "localhost")
+		}
+
+		// Add localhost IPs if not already present
+		haveIPv4 := false
+		haveIPv6 := false
+		for _, ip := range template.IPAddresses {
+			if ip.Equal(net.ParseIP("127.0.0.1")) {
+				haveIPv4 = true
+			}
+			if ip.Equal(net.ParseIP("::1")) {
+				haveIPv6 = true
+			}
+		}
+		if !haveIPv4 {
+			template.IPAddresses = append(template.IPAddresses, net.ParseIP("127.0.0.1"))
+		}
+		if !haveIPv6 {
+			template.IPAddresses = append(template.IPAddresses, net.ParseIP("::1"))
 		}
 	}
-
-	// Add SANs based on the host (without port)
-	if ip := net.ParseIP(host); ip != nil {
-		template.IPAddresses = []net.IP{ip}
-		// Also add the original serverName (with port) as DNS name for maximum compatibility
-		template.DNSNames = []string{serverName}
-	} else {
-		template.DNSNames = []string{host, serverName}
-	}
-
-	// For localhost/127.0.0.1, add both
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		template.DNSNames = append(template.DNSNames, "localhost")
-		template.IPAddresses = append(template.IPAddresses,
-			net.ParseIP("127.0.0.1"),
-			net.ParseIP("::1"),
-		)
-	}
-
-	// Add IP addresses from CertificateOptions
-	template.IPAddresses = append(template.IPAddresses, opts.IPAddresses...)
-
-	// Add DNS names from CertificateOptions
-	template.DNSNames = append(template.DNSNames, opts.DNSNames...)
 
 	// Create certificate
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, s.ca, &privKey.PublicKey, s.caKey)
@@ -203,28 +198,129 @@ func (s *GeneratedStore) generateCertificate(serverName string, opts Certificate
 
 // GetCertificate gets or generates a certificate for the given server name
 func (s *GeneratedStore) GetCertificate(ctx context.Context, serverName string) (*tls.Certificate, error) {
-	return s.GetCertificateWithOptions(ctx, serverName, DefaultCertificateOptions())
-}
-
-// GetCertificateWithOptions gets or generates a certificate for the given server name with specific options
-func (s *GeneratedStore) GetCertificateWithOptions(ctx context.Context, serverName string, opts CertificateOptions) (*tls.Certificate, error) {
-	s.mu.RLock()
-	if cert, ok := s.cache[serverName]; ok {
-		s.mu.RUnlock()
-		return cert, nil
-	}
-	s.mu.RUnlock()
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check again in case another goroutine generated it
+	// Check cache first
 	if cert, ok := s.cache[serverName]; ok {
+		if time.Now().Before(cert.Leaf.NotAfter) {
+			return cert, nil
+		}
+		delete(s.cache, serverName)
+	}
+
+	// Generate new certificate
+	cert, err := s.generateCertificate(serverName, nil) // Use default options
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache the certificate
+	s.cache[serverName] = cert
+	return cert, nil
+}
+
+// mergeCertificateOptions merges store options with provided options, letting provided options take precedence
+func (s *GeneratedStore) mergeCertificateOptions(serverName string, opts *CertificateOptions) *CertificateOptions {
+	// Start with store defaults
+	merged := &CertificateOptions{
+		CommonName:    serverName,
+		CacheDuration: s.cacheDuration,
+		KeyUsage:      s.options.KeyUsage,
+		ExtKeyUsage:   make([]x509.ExtKeyUsage, len(s.options.ExtKeyUsage)),
+		IPAddresses:   []net.IP{},
+		DNSNames:      []string{},
+		TTL:           s.options.DefaultTTL,
+	}
+
+	// Copy ExtKeyUsage slice to avoid modifying store config
+	copy(merged.ExtKeyUsage, s.options.ExtKeyUsage)
+	// Note: IP addresses and DNS names are now only set via CertificateOptions
+
+	// If no options provided, return store defaults
+	if opts == nil {
+		return merged
+	}
+
+	// Override with provided options
+	if opts.CommonName != "" {
+		merged.CommonName = opts.CommonName
+	}
+	if opts.TTL != 0 {
+		merged.TTL = opts.TTL
+	}
+	if opts.CacheDuration != 0 {
+		merged.CacheDuration = opts.CacheDuration
+	}
+	if opts.KeyUsage != 0 {
+		merged.KeyUsage = opts.KeyUsage
+	}
+	// Always ensure both client and server auth are present
+	if len(opts.ExtKeyUsage) > 0 {
+		// Start with the required usages
+		merged.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+		// Add any additional usages that aren't already present
+		for _, usage := range opts.ExtKeyUsage {
+			if usage != x509.ExtKeyUsageClientAuth && usage != x509.ExtKeyUsageServerAuth {
+				merged.ExtKeyUsage = append(merged.ExtKeyUsage, usage)
+			}
+		}
+	}
+	if len(opts.IPAddresses) > 0 {
+		merged.IPAddresses = make([]net.IP, len(opts.IPAddresses))
+		copy(merged.IPAddresses, opts.IPAddresses)
+	}
+	if len(opts.DNSNames) > 0 {
+		merged.DNSNames = make([]string, len(opts.DNSNames))
+		copy(merged.DNSNames, opts.DNSNames)
+	}
+
+	return merged
+}
+
+// getCachedCertificate returns a cached certificate if it exists and is still valid, otherwise returns nil
+func (s *GeneratedStore) getCachedCertificate(serverName string) *tls.Certificate {
+	// Check if certificate exists in cache
+	cert, exists := s.cache[serverName]
+	if !exists {
+		return nil
+	}
+
+	// Parse the certificate if needed
+	if cert.Leaf == nil {
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return nil
+		}
+		cert.Leaf = leaf
+	}
+
+	// Check if certificate has expired
+	now := time.Now()
+	if now.After(cert.Leaf.NotAfter) || now.Before(cert.Leaf.NotBefore) {
+		// Remove expired certificate from cache
+		delete(s.cache, serverName)
+		return nil
+	}
+
+	return cert
+}
+
+// GetCertificateWithOptions gets or generates a certificate for the given server name with specific options
+func (s *GeneratedStore) GetCertificateWithOptions(ctx context.Context, serverName string, opts *CertificateOptions) (*tls.Certificate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Merge store options with provided options
+	mergedOpts := s.mergeCertificateOptions(serverName, opts)
+
+	// Check cache first
+	if cert := s.getCachedCertificate(serverName); cert != nil {
 		return cert, nil
 	}
 
 	// Generate new certificate
-	cert, err := s.generateCertificate(serverName, opts)
+	cert, err := s.generateCertificate(serverName, mergedOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -235,20 +331,7 @@ func (s *GeneratedStore) GetCertificateWithOptions(ctx context.Context, serverNa
 	return cert, nil
 }
 
-func (s *GeneratedStore) PutCertificate(ctx context.Context, serverName string, cert *tls.Certificate) error {
-	s.mu.Lock()
-	s.cache[serverName] = cert
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *GeneratedStore) RemoveCertificate(ctx context.Context, serverName string) error {
-	s.mu.Lock()
-	delete(s.cache, serverName)
-	s.mu.Unlock()
-	return nil
-}
-
+// GetCertificateExpiry returns the expiry time of a certificate
 func (s *GeneratedStore) GetCertificateExpiry(ctx context.Context, serverName string) (time.Time, error) {
 	cert, err := s.GetCertificate(ctx, serverName)
 	if err != nil {
@@ -274,58 +357,4 @@ func (s *GeneratedStore) GetCAPrivateKey() *rsa.PrivateKey {
 	return s.caKey
 }
 
-// TLSClientOptions contains options for creating a TLS client configuration
-type TLSClientOptions struct {
-	ServerName string // Required: server name for certificate verification
-	InsecureSkipVerify bool // Optional: skip certificate verification (not recommended)
-}
 
-// TLSServerOptions contains options for creating a TLS server configuration
-type TLSServerOptions struct {
-	ClientAuth tls.ClientAuthType // Optional: defaults to RequireAndVerifyClientCert
-	ClientCAs  *x509.CertPool    // Optional: custom cert pool for client verification
-}
-
-// GetTLSClientConfig returns a TLS configuration suitable for a client
-func (s *GeneratedStore) GetTLSClientConfig(cert *tls.Certificate, opts TLSClientOptions) *tls.Config {
-	if opts.ServerName == "" {
-		// Use cert's common name as server name if not specified
-		if cert != nil && cert.Leaf != nil {
-			opts.ServerName = cert.Leaf.Subject.CommonName
-		}
-	}
-	
-	config := &tls.Config{
-		RootCAs:            s.GetCertPool(),
-		ServerName:         opts.ServerName,
-		InsecureSkipVerify: opts.InsecureSkipVerify,
-	}
-	
-	if cert != nil {
-		config.Certificates = []tls.Certificate{*cert}
-	}
-	
-	return config
-}
-
-// GetTLSServerConfig returns a TLS configuration suitable for a server
-func (s *GeneratedStore) GetTLSServerConfig(cert *tls.Certificate, opts TLSServerOptions) *tls.Config {
-	if opts.ClientAuth == tls.ClientAuthType(0) {
-		opts.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	
-	config := &tls.Config{
-		ClientCAs:  opts.ClientCAs,
-		ClientAuth: opts.ClientAuth,
-	}
-	
-	if config.ClientCAs == nil {
-		config.ClientCAs = s.GetCertPool()
-	}
-	
-	if cert != nil {
-		config.Certificates = []tls.Certificate{*cert}
-	}
-	
-	return config
-}

@@ -70,7 +70,7 @@ func TestCommonHeaders(t *testing.T) {
 
 	identity := &identity.Identity{
 		CommonName: "test-user",
-		Groups:    []string{"group1", "group2"},
+		Groups:     []string{"group1", "group2"},
 	}
 
 	headers, err := injector.GetHeaders("test-upstream", identity)

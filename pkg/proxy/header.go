@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"strings"
 	"text/template"
 
 	"github.com/itp/pkg/identity"
@@ -50,7 +51,7 @@ func NewHeaderInjector() *HeaderInjector {
 // AddCustomRole adds a custom role configuration
 func (h *HeaderInjector) AddCustomRole(name, templateStr string) error {
 	h.logger.Printf("Adding custom role %q with template %q", name, templateStr)
-	
+
 	// Parse template to validate it
 	tmpl := template.New("role")
 	_, err := tmpl.Parse(templateStr)
@@ -81,10 +82,18 @@ func (h *HeaderInjector) AddRoleMapping(roleName, key, value string) error {
 
 // AddHeader adds a header template for an upstream
 func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateStr string) error {
+    var err error = nil
 	h.logger.Printf("Adding header template for upstream %q: %s = %q", upstream, headerName, templateStr)
-	
+
+	// Create template with custom functions
+	tmpl := template.New("header").Funcs(template.FuncMap{
+		"join": strings.Join,
+		"comma": func(items []string) string { return strings.Join(items, ",") },
+		"space": func(items []string) string { return strings.Join(items, " ") },
+	})
+
 	// Parse template
-	tmpl, err := template.New("header").Parse(templateStr)
+	tmpl, err = tmpl.Parse(templateStr)
 	if err != nil {
 		h.logger.Printf("Failed to parse template: %v", err)
 		return fmt.Errorf("failed to parse template: %v", err)
@@ -95,11 +104,11 @@ func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateS
 		CommonName:       "test",
 		Organization:     []string{"test-org"},
 		OrganizationUnit: []string{"test-ou"},
-		Locality:        []string{"test-locality"},
-		Country:         []string{"test-country"},
-		State:           []string{"test-state"},
-		Groups:          []string{"test-group"},
-		Roles:           []string{"test-role"},
+		Locality:         []string{"test-locality"},
+		Country:          []string{"test-country"},
+		State:            []string{"test-state"},
+		Groups:           []string{"test-group"},
+		Roles:            []string{"test-role"},
 	}
 
 	var buf bytes.Buffer
@@ -121,7 +130,7 @@ func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateS
 // AddCommonHeader adds a common header (groups, roles, etc) for an upstream
 func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string) error {
 	h.logger.Printf("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
-	
+
 	var templateStr string
 	switch headerType {
 	case "groups":
@@ -143,7 +152,7 @@ func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string
 		h.logger.Printf("Unknown header type: %s", headerType)
 		return fmt.Errorf("unknown header type: %s", headerType)
 	}
-	
+
 	h.logger.Printf("Using template: %q", templateStr)
 	return h.AddHeader(upstream, headerName, templateStr)
 }

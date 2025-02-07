@@ -38,10 +38,10 @@ func (m *MockStore) GetCertificateExpiry(ctx context.Context, serverName string)
 	return args.Get(0).(time.Time), args.Error(1)
 }
 
-func TestOptions(t *testing.T) {
-	opts := Options{
+func TestStoreOptions(t *testing.T) {
+	opts := StoreOptions{
 		CacheDuration: 1 * time.Hour,
-		DefaultTTL:    24 * time.Hour,
+		DefaultTTL: 24 * time.Hour,
 	}
 
 	assert.Equal(t, 1*time.Hour, opts.CacheDuration)
@@ -51,7 +51,7 @@ func TestOptions(t *testing.T) {
 func TestCachedCert(t *testing.T) {
 	cert := &tls.Certificate{}
 	expiry := time.Now().Add(1 * time.Hour)
-	
+
 	cached := &cachedCert{
 		cert:      cert,
 		expiresAt: expiry,

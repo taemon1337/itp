@@ -1,28 +1,31 @@
 package proxy
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/itp/pkg/identity"
+	"github.com/itp/pkg/certstore"
+	"github.com/itp/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/itp/pkg/logger"
-	"github.com/itp/pkg/certstore"
 )
 
 const (
-	testInternalDomain = "internal.local"
-	testExternalDomain = "external.com"
-	testClientSNI = "test-client"
-	testServerSNI = "test-server"
-	testEchoSNI   = "test-upstream"
-	upstreamServerName = testEchoSNI + "." + testInternalDomain
+	testInternalDomain = "internal.test"
+	testExternalDomain = "external.test"
+	testClientServerName      = "test-client"
+	testServerServerName      = "test-server"
+	testEchoServerName        = "test-upstream"
+	testProxyServerName       = "test-proxy"
+	testEchoServerNameInternal = "test-upstream.internal.test"
+	testEchoServerNameExternal = "test-upstream.external.test"
 )
 
 // setupTestLoggers creates loggers for testing
@@ -57,36 +60,36 @@ func TestGetDefaultSNI(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "localhost IPv4",
-			addr:     "127.0.0.1:8443",
-			expected: "localhost",
+			name:     "IPv4 address",
+			addr:     "192.168.1.1:443",
+			expected: "",
 		},
 		{
-			name:     "localhost IPv6",
-			addr:     "[::1]:8443",
-			expected: "localhost",
+			name:     "IPv6 address",
+			addr:     "[2001:db8::1]:443",
+			expected: "",
 		},
 		{
-			name:     "any IPv4",
-			addr:     "0.0.0.0:8443",
-			expected: "localhost",
+			name:     "Hostname",
+			addr:     "example.com:443",
+			expected: "example.com",
 		},
 		{
-			name:     "any IPv6",
-			addr:     "[::]:8443",
-			expected: "localhost",
-		},
-		{
-			name:     "specific IP",
-			addr:     "192.168.1.1:8443",
-			expected: "192.168.1.1",
+			name:     "Hostname with port",
+			addr:     "test.example.com:8443",
+			expected: "test.example.com",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proxyLogger, _, _, _ := setupTestLoggers()
-			proxy := &Proxy{logger: proxyLogger}
+			proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
+			proxy := &Proxy{
+				proxyLogger:      proxyLogger,
+				routerLogger:     routerLogger,
+				translatorLogger: translatorLogger,
+				echoLogger:      echoLogger,
+			}
 			conn := &mockConn{addr: mockAddr{network: "tcp", address: tt.addr}}
 			result := proxy.getDefaultSNI(conn)
 			assert.Equal(t, tt.expected, result)
@@ -94,71 +97,97 @@ func TestGetDefaultSNI(t *testing.T) {
 	}
 }
 
-func TestNew(t *testing.T) {
-	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
-	config := &Config{
-		CertStoreType:         "auto",
-		CertStoreTTL:          24 * time.Hour,
-		CertStoreCacheDuration: time.Hour,
-		AllowUnknownCerts:     true,
-		AutoMapCN:             true,
-		ListenAddr:            ":8443",
-		ProxyLogger:          proxyLogger,
-		RouterLogger:         routerLogger,
-		TranslatorLogger:     translatorLogger,
-		EchoLogger:          echoLogger,
+func TestNewProxy(t *testing.T) {
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	// Enable both upstream and downstream header injection for testing
+	config.InjectHeadersUpstream = true
+	config.InjectHeadersDownstream = true
+	config.ListenAddr = ":8443"
+	config.EchoAddr = ":8453"
+	config.AllowUnknownCerts = true
+
+	// Configure server cert store with default certificate options
+	config.CertStoreConfig.CommonName = testProxyServerName
+	config.DefaultCertOptions = &certstore.CertificateOptions{
+		CommonName: testProxyServerName,
+		TTL:        24 * time.Hour, // Override store's DefaultTTL
+		DNSNames: []string{
+			"localhost",
+			testProxyServerName,
+			fmt.Sprintf("*.%s", testExternalDomain),
+		},
 	}
 
-	p, err := New(config)
+	// Configure echo cert store with default certificate options
+	config.EchoDefaultCertOptions = &certstore.CertificateOptions{
+		CommonName: testEchoServerName,
+		TTL:        24 * time.Hour, // Override store's DefaultTTL
+		DNSNames: []string{
+			"localhost",
+			testEchoServerNameInternal,
+		},
+	}
+
+	p, err := NewProxy(config)
 	require.NoError(t, err)
 
 	assert.NotNil(t, p)
 	assert.NotNil(t, p.router)
 	assert.NotNil(t, p.translator)
-	assert.NotNil(t, p.certStore)
+	assert.NotNil(t, p.serverCertStore)
+	assert.NotNil(t, p.internalCertStore)
 	assert.Equal(t, config.AllowUnknownCerts, p.allowUnknownCerts)
 	assert.True(t, p.AutoMapEnabled())
+
+	// Get server certificate to validate options
+	genServerStore, ok := p.serverCertStore.(*certstore.GeneratedStore)
+	require.True(t, ok)
+	serverCert, err := genServerStore.GetCertificateWithOptions(context.Background(), testProxyServerName, config.DefaultCertOptions)
+	require.NoError(t, err)
+	x509ServerCert, err := x509.ParseCertificate(serverCert.Certificate[0])
+	require.NoError(t, err)
+
+	// Validate server certificate
+	assert.Equal(t, testProxyServerName, x509ServerCert.Subject.CommonName)
+	assert.True(t, x509ServerCert.NotBefore.Before(time.Now()))
+	assert.True(t, x509ServerCert.NotAfter.After(time.Now()))
+	// Certificate should expire in ~24h (plus small buffer for test timing)
+	assert.True(t, x509ServerCert.NotAfter.Before(time.Now().Add(25*time.Hour))) // 24h TTL + 1h buffer
+
+	// Get echo certificate to validate options
+	genEchoStore, ok := p.internalCertStore.(*certstore.GeneratedStore)
+	require.True(t, ok)
+	echoCert, err := genEchoStore.GetCertificateWithOptions(context.Background(), fmt.Sprintf("echo.%s", testInternalDomain), config.EchoDefaultCertOptions)
+	require.NoError(t, err)
+	x509EchoCert, err := x509.ParseCertificate(echoCert.Certificate[0])
+	require.NoError(t, err)
+
+	// Validate echo certificate
+	assert.Equal(t, fmt.Sprintf("echo.%s", testInternalDomain), x509EchoCert.Subject.CommonName)
+	assert.True(t, x509EchoCert.NotBefore.Before(time.Now()))
+	assert.True(t, x509EchoCert.NotAfter.After(time.Now()))
+	// Certificate should expire in ~24h (plus small buffer for test timing)
+	assert.True(t, x509EchoCert.NotAfter.Before(time.Now().Add(25*time.Hour))) // 24h TTL + 1h buffer
 }
 
 func TestHandleConnection(t *testing.T) {
-	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
-	// Create test configuration
-	config := &Config{
-		CertFile:              "auto",
-		KeyFile:               "auto",
-		CAFile:                "",
-		ServerName:            testServerSNI,
-		InternalDomain:        testInternalDomain,
-		ExternalDomain:        testExternalDomain,
-		CertOptions: certstore.CertificateOptions{
-			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
-			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
-		},
-		CertStoreType:         "auto",
-		CertStoreTTL:          24 * time.Hour,
-		CertStoreCacheDuration: time.Hour,
-		AllowUnknownCerts:     true,
-		AutoMapCN:             true,
-		InjectHeadersUpstream: true,   // Enable header injection
-		InjectHeadersDownstream: true,  // Enable header injection for responses
-		ListenAddr:            "127.0.0.1:8443",
-		EchoName:              testEchoSNI,
-		EchoAddr:              "127.0.0.1:9443",
-		ProxyLogger:          proxyLogger,
-		RouterLogger:         routerLogger,
-		TranslatorLogger:     translatorLogger,
-		EchoLogger:          echoLogger,
-	}
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	// Enable both upstream and downstream header injection for testing
+	config.InjectHeadersUpstream = true
+	config.InjectHeadersDownstream = true
+	config.ListenAddr = "127.0.0.1:8443"
+	config.EchoAddr = "127.0.0.1:8453"
+	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := New(config)
+	p, err := NewProxy(config)
 	require.NoError(t, err)
 
 	// Add static route for echo server
-	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
+	p.AddStaticRoute(testEchoServerNameExternal, config.EchoAddr) // Use external name since that's what clients connect with
 
 	// Add header template for client CN
-	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Client-CN", "{{ .CommonName }}")
+	err = p.AddHeader(testEchoServerNameExternal, "X-Client-CN", "{{ .CommonName }}") // Use external name since that's what clients use
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -173,100 +202,62 @@ func TestHandleConnection(t *testing.T) {
 	require.NoError(t, waitForServer(t, config.ListenAddr))
 	require.NoError(t, waitForServer(t, config.EchoAddr))
 
-	// Create client connection
-	clientConn, err := net.Dial("tcp", config.ListenAddr)
-	require.NoError(t, err)
-	defer clientConn.Close()
-
-	// Configure client TLS
-	clientCert, err := p.certStore.GetCertificate(context.Background(), testClientSNI)
+	// Get client certificate from internal store
+	clientCert, err := p.serverCertStore.GetCertificate(context.Background(), testClientServerName)
 	require.NoError(t, err)
 
-	clientTLSConfig := &tls.Config{
-		Certificates:       []tls.Certificate{*clientCert},
-		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
-		InsecureSkipVerify: true,  // For testing only
+	// Create HTTP client with TLS config
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{*clientCert},
+				RootCAs:     p.serverCertStore.GetCertPool(), // Trust server CA to verify proxy's cert
+				ServerName:  testEchoServerNameExternal, // we use external domain heading into the proxy
+			},
+		},
 	}
 
-	// Create TLS connection
-	clientTLSConn := tls.Client(clientConn, clientTLSConfig)
-	defer clientTLSConn.Close()
-
-	// Perform TLS handshake
-	err = clientTLSConn.Handshake()
+	resp, err := client.Get(fmt.Sprintf("https://%s", config.ListenAddr))
 	require.NoError(t, err)
-
-	// Write test request
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
-	require.NoError(t, err)
-
-	err = req.Write(clientTLSConn)
-	require.NoError(t, err)
-
-	// Read response with timeout
-	clientTLSConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), nil)
-	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	// Check response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, testClientSNI, resp.Header.Get("X-Client-CN"))
+	assert.Equal(t, testClientServerName, resp.Header.Get("X-Client-CN"))
 }
 
 func TestHeaderInjection(t *testing.T) {
-	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
-	// Create test configuration
-	config := &Config{
-		CertFile:              "auto",
-		KeyFile:               "auto",
-		CAFile:                "",
-		ServerName:            testServerSNI,
-		InternalDomain:        testInternalDomain,
-		ExternalDomain:        testExternalDomain,
-		CertOptions: certstore.CertificateOptions{
-			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
-			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
-		},
-		CertStoreType:         "auto",
-		CertStoreTTL:          24 * time.Hour,
-		CertStoreCacheDuration: time.Hour,
-		AllowUnknownCerts:     true,
-		AutoMapCN:             true,
-		InjectHeadersUpstream: true,   // Enable header injection
-		InjectHeadersDownstream: true,  // Enable header injection for responses
-		ListenAddr:            "127.0.0.1:8444",
-		EchoName:              testEchoSNI,
-		EchoAddr:              "127.0.0.1:9444",
-		ProxyLogger:          proxyLogger,
-		RouterLogger:         routerLogger,
-		TranslatorLogger:     translatorLogger,
-		EchoLogger:          echoLogger,
-	}
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	// Enable both upstream and downstream header injection for testing
+	config.InjectHeadersUpstream = true
+	config.InjectHeadersDownstream = true
+	config.ListenAddr = "127.0.0.1:8444"
+	config.EchoAddr = "127.0.0.1:8454"
+	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := New(config)
+	p, err := NewProxy(config)
 	require.NoError(t, err)
 
 	// Add static route for echo server
-	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
+	p.AddStaticRoute(testEchoServerNameExternal, config.EchoAddr) // Use external name since that's what clients connect with
 
 	// Add identity mappings for testing
-	p.translator.AddMapping("cn", testClientSNI, "mapped-user")
-	p.translator.AddRoleMapping("cn", testClientSNI, []string{"developer"})
-	p.translator.AddGroupMapping("cn", testClientSNI, []string{"dev-team"})
+	p.translator.AddMapping("cn", testClientServerName, "mapped-user")
+	p.translator.AddRoleMapping("cn", testClientServerName, []string{"developer"})
+	p.translator.AddGroupMapping("cn", testClientServerName, []string{"dev-team"})
 
 	// Add header templates with more test cases
-	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Custom", "{{ .CommonName }}")
+	err = p.AddHeader(testEchoServerNameExternal, "X-Custom", "{{ .CommonName }}") // Use external name since that's what clients use
 	require.NoError(t, err)
 
-	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Groups", "{{ range .Groups }}{{.}},{{end}}")
+	err = p.AddHeader(testEchoServerNameExternal, "X-Groups", "{{ .Groups | comma }}") // Use external name since that's what clients use
 	require.NoError(t, err)
 
-	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Roles", "{{ range .Roles }}{{.}},{{end}}")
+	err = p.AddHeader(testEchoServerNameExternal, "X-Roles", "{{ .Roles | comma }}") // Use external name since that's what clients use
 	require.NoError(t, err)
 
-	err = p.AddCommonHeader("cn", fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Common-CN")
+	err = p.AddCommonHeader("cn", testEchoServerNameExternal, "X-Common-CN") // Use external name since that's what clients use
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -281,94 +272,54 @@ func TestHeaderInjection(t *testing.T) {
 	require.NoError(t, waitForServer(t, config.ListenAddr))
 	require.NoError(t, waitForServer(t, config.EchoAddr))
 
-	// Create client connection
-	clientConn, err := net.Dial("tcp", config.ListenAddr)
-	require.NoError(t, err)
-	defer clientConn.Close()
-
-	// Configure client TLS
-	clientCert, err := p.certStore.GetCertificate(context.Background(), testClientSNI)
+	// Get client certificate from internal store
+	clientCert, err := p.serverCertStore.GetCertificate(context.Background(), testClientServerName)
 	require.NoError(t, err)
 
-	clientTLSConfig := &tls.Config{
-		Certificates:       []tls.Certificate{*clientCert},
-		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
-		InsecureSkipVerify: true,  // For testing only
+	// Create HTTP client with TLS config
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{*clientCert},
+				RootCAs:     p.serverCertStore.GetCertPool(), // Trust server CA to verify proxy's cert
+				ServerName:  testEchoServerNameExternal, // we use external domain heading into the proxy
+			},
+		},
 	}
 
-	// Create TLS connection
-	clientTLSConn := tls.Client(clientConn, clientTLSConfig)
-	defer clientTLSConn.Close()
-
-	// Perform TLS handshake
-	err = clientTLSConn.Handshake()
+	resp, err := client.Get(fmt.Sprintf("https://%s", config.ListenAddr))
 	require.NoError(t, err)
-
-	// Write test request
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
-	require.NoError(t, err)
-
-	err = req.Write(clientTLSConn)
-	require.NoError(t, err)
-
-	// Read response with timeout
-	clientTLSConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), nil)
-	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	// Check response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Check headers were properly injected
-	assert.Equal(t, "mapped-user", resp.Header.Get("X-Custom"), "Custom header should contain mapped CommonName")
-	assert.Equal(t, "dev-team,", resp.Header.Get("X-Groups"), "Groups header should contain mapped groups")
-	assert.Equal(t, "developer,", resp.Header.Get("X-Roles"), "Roles header should contain mapped roles")
-	assert.Equal(t, "mapped-user", resp.Header.Get("X-Common-CN"), "Common CN header should contain mapped CommonName")
+	assert.Equal(t, "mapped-user", resp.Header.Get("X-Custom")) // CommonName is the mapped identity
+	assert.Equal(t, "dev-team", resp.Header.Get("X-Groups"))
+	assert.Equal(t, "developer", resp.Header.Get("X-Roles"))
+	assert.Equal(t, "mapped-user", resp.Header.Get("X-Common-CN"))
 }
 
 func TestGroupHeaderInjection(t *testing.T) {
-	proxyLogger, routerLogger, translatorLogger, echoLogger := setupTestLoggers()
-	// Create test configuration
-	config := &Config{
-		CertFile:              "auto",
-		KeyFile:               "auto",
-		CAFile:                "",
-		ServerName:            testServerSNI,
-		InternalDomain:        testInternalDomain,
-		ExternalDomain:        testExternalDomain,
-		CertOptions: certstore.CertificateOptions{
-			DNSNames:              []string{fmt.Sprintf("*.%s", testInternalDomain)},
-			CommonName:            testClientSNI,  // Set the CommonName for the test certificate
-		},
-		CertStoreType:         "auto",
-		CertStoreTTL:          24 * time.Hour,
-		CertStoreCacheDuration: time.Hour,
-		AllowUnknownCerts:     true,
-		AutoMapCN:             true,
-		InjectHeadersUpstream: true,   // Enable header injection
-		InjectHeadersDownstream: true,  // Enable header injection for responses
-		ListenAddr:            "127.0.0.1:8445",
-		EchoName:              testEchoSNI,
-		EchoAddr:              "127.0.0.1:9445",
-		ProxyLogger:          proxyLogger,
-		RouterLogger:         routerLogger,
-		TranslatorLogger:     translatorLogger,
-		EchoLogger:          echoLogger,
-	}
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	// Enable both upstream and downstream header injection for testing
+	config.InjectHeadersUpstream = true
+	config.InjectHeadersDownstream = true
+	config.ListenAddr = "127.0.0.1:8445"
+	config.EchoAddr = "127.0.0.1:8455"
+	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := New(config)
+	p, err := NewProxy(config)
 	require.NoError(t, err)
 
 	// Add static route for echo server
-	p.AddStaticRoute(testEchoSNI, config.EchoAddr)
+	p.AddStaticRoute(testEchoServerNameExternal, config.EchoAddr) // Use external name since that's what clients connect with
 
 	// Add group mapping for test client
-	p.translator.AddGroupMapping("cn", testClientSNI, []string{"TestGroup"})
+	p.translator.AddGroupMapping("cn", testClientServerName, []string{"TestGroup"})
 
 	// Add header template for groups
-	err = p.AddHeader(fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain), "X-Echo-Groups", "{{ range .Groups }}{{ . }}{{ end }}")
+	err = p.AddHeader(testEchoServerNameExternal, "X-Echo-Groups", "{{ range .Groups }}{{ . }}{{ end }}") // Use external name since that's what clients use
 	require.NoError(t, err)
 
 	// Start echo server and proxy server in goroutine
@@ -383,41 +334,24 @@ func TestGroupHeaderInjection(t *testing.T) {
 	require.NoError(t, waitForServer(t, config.ListenAddr))
 	require.NoError(t, waitForServer(t, config.EchoAddr))
 
-	// Create client connection
-	clientConn, err := net.Dial("tcp", config.ListenAddr)
-	require.NoError(t, err)
-	defer clientConn.Close()
-
-	// Configure client TLS
-	clientCert, err := p.certStore.GetCertificate(context.Background(), testClientSNI)
+	// Get client certificate from server/external store (since in this test we are connecting to proxy which is then proxying to echo/internal)
+	clientCert, err := p.serverCertStore.GetCertificate(context.Background(), testClientServerName)
 	require.NoError(t, err)
 
-	clientTLSConfig := &tls.Config{
-		Certificates:       []tls.Certificate{*clientCert},
-		RootCAs:            p.certStore.GetCertPool(),
-		ServerName:         fmt.Sprintf("%s.%s", testEchoSNI, testInternalDomain),
-		InsecureSkipVerify: true,  // For testing only
+	// Create HTTP client with TLS config
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{*clientCert},
+				RootCAs:     p.serverCertStore.GetCertPool(), // Trust server CA to verify proxy's cert
+				ServerName:  testEchoServerNameExternal, // we use external domain heading into the proxy
+			},
+		},
 	}
 
-	// Create TLS connection
-	clientTLSConn := tls.Client(clientConn, clientTLSConfig)
-	defer clientTLSConn.Close()
-
-	// Perform TLS handshake
-	err = clientTLSConn.Handshake()
+	resp, err := client.Get(fmt.Sprintf("https://%s", config.ListenAddr))
 	require.NoError(t, err)
-
-	// Write test request
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://%s.%s", testEchoSNI, testInternalDomain), nil)
-	require.NoError(t, err)
-
-	err = req.Write(clientTLSConn)
-	require.NoError(t, err)
-
-	// Read response with timeout
-	clientTLSConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), nil)
-	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	// Check response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -436,4 +370,49 @@ func waitForServer(t *testing.T, addr string) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("server failed to start within timeout")
+}
+
+func TestAddHeader(t *testing.T) {
+	p := &Proxy{
+		config: &Config{
+			InjectHeadersUpstream:   true,
+			InjectHeadersDownstream: false,
+		},
+		proxyLogger:      logger.New("proxy", logger.LevelInfo),
+		routerLogger:     logger.New("router", logger.LevelInfo),
+		translatorLogger: logger.New("translator", logger.LevelInfo),
+		echoLogger:      logger.New("echo", logger.LevelInfo),
+		headerInjector:   NewHeaderInjector(),
+	}
+
+	// Test adding a header template
+	err := p.AddHeader("test-upstream.external.test", "X-Test", "{{ .CommonName }}") // Use fully qualified external domain
+	require.NoError(t, err)
+
+	// Test adding an invalid template
+	err = p.AddHeader("test-upstream.external.test", "X-Invalid", "{{ .Invalid }}") // Use fully qualified external domain
+	require.Error(t, err)
+}
+
+func TestAddCommonHeader(t *testing.T) {
+	p := &Proxy{
+		config: &Config{
+			InjectHeadersUpstream:   true,
+			InjectHeadersDownstream: false,
+		},
+		proxyLogger:      logger.New("proxy", logger.LevelInfo),
+		routerLogger:     logger.New("router", logger.LevelInfo),
+		translatorLogger: logger.New("translator", logger.LevelInfo),
+		echoLogger:      logger.New("echo", logger.LevelInfo),
+		headerInjector:   NewHeaderInjector(),
+		translator:       identity.NewTranslator(logger.New("translator", logger.LevelInfo), true),
+	}
+
+	// Test adding a common header
+	err := p.AddCommonHeader("cn", "test-upstream.external.test", "X-Common") // Use fully qualified external domain
+	require.NoError(t, err)
+
+	// Test adding a header with invalid field
+	err = p.AddCommonHeader("invalid", "test-upstream.external.test", "X-Invalid") // Use fully qualified external domain
+	require.Error(t, err)
 }

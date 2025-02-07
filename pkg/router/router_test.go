@@ -3,8 +3,8 @@ package router
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/itp/pkg/logger"
+	"github.com/stretchr/testify/assert"
 )
 
 // setupTestLogger creates a logger for testing
@@ -48,20 +48,20 @@ func TestSetEchoUpstream(t *testing.T) {
 
 func TestResolveDestination(t *testing.T) {
 	tests := []struct {
-		name           string
-		serverName     string
-		staticRoutes   map[string]string
-		echoName       string
-		echoAddr       string
-		useDNS         bool
-		expectedDest   string
-		expectedError  string
+		name          string
+		serverName    string
+		staticRoutes  map[string]string
+		echoName      string
+		echoAddr      string
+		useDNS        bool
+		expectedDest  string
+		expectedError string
 	}{
 		{
-			name:       "echo upstream direct",
-			serverName: "echo.test",
-			echoName:   "echo.test",
-			echoAddr:   "localhost:8080",
+			name:         "echo upstream direct",
+			serverName:   "echo.test",
+			echoName:     "echo.test",
+			echoAddr:     "localhost:8080",
 			expectedDest: "localhost:8080",
 		},
 		{
@@ -78,32 +78,32 @@ func TestResolveDestination(t *testing.T) {
 			staticRoutes: map[string]string{
 				"example.com": "echo.test",
 			},
-			echoName:    "echo.test",
-			echoAddr:    "localhost:8080",
+			echoName:     "echo.test",
+			echoAddr:     "localhost:8080",
 			expectedDest: "localhost:8080",
 		},
 		{
-			name:       "no route found with DNS disabled",
-			serverName: "unknown.example.com",
-			useDNS:     false,
+			name:          "no route found with DNS disabled",
+			serverName:    "unknown.example.com",
+			useDNS:        false,
 			expectedError: "no route found for unknown.example.com",
 		},
 		{
-			name:       "no route found with DNS enabled but invalid hostname",
-			serverName: "invalid..hostname",
-			useDNS:     true,
+			name:          "no route found with DNS enabled but invalid hostname",
+			serverName:    "invalid..hostname",
+			useDNS:        true,
 			expectedError: "DNS lookup failed for invalid..hostname",
 		},
 		{
-			name:       "route via DNS when enabled",
-			serverName: "localhost:8443",
-			useDNS:     true,
+			name:         "route via DNS when enabled",
+			serverName:   "localhost:8443",
+			useDNS:       true,
 			expectedDest: "127.0.0.1:8443",
 		},
 		{
-			name:       "route via DNS with default port",
-			serverName: "localhost",
-			useDNS:     true,
+			name:         "route via DNS with default port",
+			serverName:   "localhost",
+			useDNS:       true,
 			expectedDest: "127.0.0.1:443",
 		},
 	}
@@ -113,7 +113,7 @@ func TestResolveDestination(t *testing.T) {
 			logger := setupTestLogger()
 			r := NewRouter(logger, tt.useDNS)
 			r.SetEchoUpstream(tt.echoName, tt.echoAddr)
-			
+
 			for src, dest := range tt.staticRoutes {
 				r.AddStaticRoute(src, dest)
 			}

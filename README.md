@@ -89,11 +89,20 @@ make docker-build  # Build both Docker variants
 
 ## Quick Start
 
-Start the proxy with automatic certificate generation and routing:
+Start the proxy with automatic certificate generation:
 ```bash
-itp --server-cert auto \
-    --server-name proxy.example.com \
+itp --server-name proxy.example.com \
     --server-san "proxy.internal,proxy.dev" \
+    --map-auto \
+    --route "app.cluster.com=app.default.svc.cluster.local"
+```
+
+Or use your own certificates:
+```bash
+itp --server-cert /path/to/cert.pem \
+    --server-key /path/to/key.pem \
+    --server-ca /path/to/ca.pem \
+    --server-name proxy.example.com \
     --map-auto \
     --route "app.cluster.com=app.default.svc.cluster.local"
 ```
@@ -102,71 +111,60 @@ itp --server-cert auto \
 
 ### TLS Configuration
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--server-cert` | Server certificate file or 'auto' for auto-generated | `auto` |
-| `--server-key` | Server key file or 'auto' for auto-generated | `auto` |
-| `--server-ca` | CA certificate file for server cert (only used with auto-generated certs) | |
-| `--server-name` | Server name for TLS connection | |
-| `--server-san` | Additional DNS names for server certificate (comma-separated) | |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--server-cert` | Server certificate file (empty for auto-generated) | `""` |
+| `--server-key` | Server key file (empty for auto-generated) | `""` |
+| `--server-ca` | CA certificate file for server cert | `""` |
+| `--server-name` | Server name for TLS connection | `proxy.test` |
+| `--server-san` | Additional DNS names for server certificate (comma-separated) | `""` |
 | `--server-allow-unknown-client-certs` | Allow client certificates from unknown CAs | `false` |
-| `--internal-domain` | Internal domain for inside/upstream connections | `cluster.local` |
-| `--external-domain` | External domain for incoming connections | |
+| `--internal-domain` | Internal domain for inside/upstream connections | `internal.local` |
+| `--external-domain` | External domain for incoming connections | `external.com` |
+
+### Certificate Generation
+
+When `--server-cert` is empty, ITP will automatically generate certificates:
+- Server certificate for external connections (proxy's public interface)
+- Internal certificates for client authentication and upstream connections
+- All certificates include appropriate SANs based on domains and server names
+
+When `--server-cert` is provided:
+- Uses the specified certificate files for both server and client connections
+- CA certificate is required for client certificate verification
+- Certificate must be valid for the specified `--server-name`
 
 ### Echo Server Configuration
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--echo` | Name for the echo upstream (e.g. 'echo' to use in --route) | |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--echo` | Name for the echo upstream | `""` |
 | `--echo-addr` | Address for echo upstream server | `:8444` |
-| `--echo-san` | Additional DNS names for echo server certificate | |
-
-### Identity Translation
-
-| Option | Description | Example |
-|--------|-------------|---------|
-| `--map-auto` | Automatically map client CN to upstream CN | `--map-auto` |
-| `--map-common-name` | Map common names | `--map-common-name "external.user=internal.user"` |
-| `--map-organization` | Map organizations | `--map-organization "ExternalOrg=InternalTeam"` |
-| `--map-organization-unit` | Map org units | `--map-organization-unit "ExternalOU=InternalOU"` |
-| `--add-role` | Add roles based on cert fields | `--add-role "cn=admin@example.com=admin"` |
-| `--add-auth` | Add auth values based on cert fields | `--add-auth "org=engineering=read,write"` |
-
-### Header Injection
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--inject-header` | Inject headers using templates | See examples below |
-| `--inject-headers-upstream` | Inject headers into upstream requests | `true` |
-| `--inject-headers-downstream` | Inject headers into downstream responses | `false` |
-
-Example header template:
-```bash
---inject-header 'backend=X-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}'
-```
-
-Available template variables:
-- `{{.CommonName}}` - Certificate common name
-- `{{.Organization}}` - Organization names
-- `{{.OrganizationalUnit}}` - Organizational unit names
-- `{{.Groups}}` - Group names
-- `{{.Roles}}` - Role names
-- `{{.Auths}}` - Auth values
+| `--echo-san` | Additional DNS names for echo server certificate | `""` |
 
 ### Routing Configuration
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--route` | Static routes (src=dest[,src=dest,...]) | |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--route` | Static routes (format: src=dest[,src=dest,...]) | `""` |
 | `--route-via-dns` | Allow routing via DNS | `false` |
+| `--map-auto` | Automatically map client CN to upstream CN | `false` |
 
-### Other Options
+### Header Injection
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--addr` | Address to listen on | `:8443` |
-| `--cert-store` | Certificate store type (k8s or auto) | `auto` |
-| `--config` | Path to YAML configuration file | |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--inject-header` | Inject headers (format: upstream=name=template[,...]) | `""` |
+| `--inject-headers-upstream` | Inject headers into upstream requests | `true` |
+| `--inject-headers-downstream` | Inject headers into downstream responses | `false` |
+
+### Identity Mapping
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--add-role` | Add roles (format: field=value=role1,role2,...) | `""` |
+| `--add-auth` | Add auth values (format: field=value=auth1,auth2,...) | `""` |
+| `--config` | Path to YAML configuration file | `""` |
 
 ## Project Structure
 
@@ -182,3 +180,113 @@ Available template variables:
 │   └── router/          # Request routing
 └── examples/            # Example configurations
 ```
+
+## Identity Translation Proxy (ITP)
+
+A TLS proxy that translates client identities between different domains, with support for header injection and flexible routing.
+
+## Features
+
+- TLS termination with client certificate authentication
+- Automatic certificate generation for server and clients
+- Identity translation between external and internal domains
+- Header injection based on client certificate attributes
+- Flexible routing with DNS support
+- Echo server for testing and development
+
+## Installation
+
+```bash
+go install github.com/taemon1337/itp@latest
+```
+
+## Usage
+
+### Basic Usage
+
+The minimum required configuration needs a server name, external domain, and internal domain:
+
+```bash
+itp --server-name proxy.example.com \
+    --external-domain example.com \
+    --internal-domain internal.local
+```
+
+### Configuration Options
+
+#### Required Flags
+- `--server-name`: Server name for the proxy (e.g., proxy.example.com)
+- `--external-domain`: External domain for connections (e.g., external.com)
+- `--internal-domain`: Internal domain for connections (e.g., internal.local)
+
+#### Optional Flags
+- `--listen`: Address to listen on (default: ":8443")
+- `--echo-name`: Name for the echo server (defaults to echo.<internal-domain>)
+- `--echo-addr`: Address for the echo server (default: ":8444")
+
+#### Certificate Configuration
+- `--cert`: Path to certificate file
+- `--key`: Path to private key file
+- `--ca`: Path to CA certificate file
+
+#### Security Options
+- `--allow-unknown-certs`: Allow unknown client certificates
+- `--route-via-dns`: Enable DNS-based routing
+- `--auto-map-cn`: Automatically map CommonName (default: true)
+
+#### Header Injection
+- `--inject-headers-upstream`: Inject headers upstream (default: true)
+- `--inject-headers-downstream`: Inject headers downstream (default: false)
+
+### Examples
+
+#### Basic Proxy with Echo Server
+
+```bash
+itp --server-name proxy.example.com \
+    --external-domain example.com \
+    --internal-domain internal.local \
+    --echo-name echo
+```
+
+#### Custom Certificates
+
+```bash
+itp --server-name proxy.example.com \
+    --external-domain example.com \
+    --internal-domain internal.local \
+    --cert /path/to/cert.pem \
+    --key /path/to/key.pem \
+    --ca /path/to/ca.pem
+```
+
+#### Development Mode
+
+```bash
+itp --server-name proxy.test \
+    --external-domain test.com \
+    --internal-domain local \
+    --allow-unknown-certs \
+    --echo-name echo \
+    --route-via-dns
+```
+
+## Development
+
+### Building from Source
+
+```bash
+git clone https://github.com/taemon1337/itp.git
+cd itp
+go build
+```
+
+### Running Tests
+
+```bash
+go test ./...
+```
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

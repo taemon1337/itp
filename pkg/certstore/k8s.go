@@ -33,14 +33,14 @@ type K8sStore struct {
 
 // K8sOptions contains Kubernetes-specific store options
 type K8sOptions struct {
-	Options
-	Namespace     string
-	Client        kubernetes.Interface
-	CMClient      cmclient.Interface
-	CACertPEM     []byte // Optional: CA certificate in PEM format
-	IssuerName    string // Name of the cert-manager issuer to use
-	IssuerKind    string // Kind of the cert-manager issuer (e.g., "ClusterIssuer" or "Issuer")
-	IssuerGroup   string // API group of the issuer (defaults to cert-manager.io)
+	StoreOptions
+	Namespace   string
+	Client      kubernetes.Interface
+	CMClient    cmclient.Interface
+	CACertPEM   []byte // Optional: CA certificate in PEM format
+	IssuerName  string // Name of the cert-manager issuer to use
+	IssuerKind  string // Kind of the cert-manager issuer (e.g., "ClusterIssuer" or "Issuer")
+	IssuerGroup string // API group of the issuer (defaults to cert-manager.io)
 }
 
 // NewK8sStore creates a new Kubernetes-based certificate store
@@ -53,10 +53,10 @@ func NewK8sStore(opts K8sOptions) *K8sStore {
 		client:        opts.Client,
 		cmClient:      opts.CMClient,
 		namespace:     opts.Namespace,
-		cache:        make(map[string]*cachedCert),
+		cache:         make(map[string]*cachedCert),
 		cacheDuration: opts.CacheDuration,
 		defaultOpts: CertificateOptions{
-			TTL:         opts.DefaultTTL,
+			CommonName:  "", // Will be set per certificate
 			KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		},
@@ -154,6 +154,7 @@ func (s *K8sStore) createOrUpdateCertificate(ctx context.Context, serverName str
 			SecretName: serverName,
 			CommonName: serverName,
 			Duration:   &metav1.Duration{Duration: opts.TTL},
+			RenewBefore: &metav1.Duration{Duration: 24 * time.Hour}, // Renew 24h before expiry
 			IssuerRef:  s.issuerRef,
 			Usages:     usages,
 			PrivateKey: &cmapi.CertificatePrivateKey{
@@ -240,42 +241,6 @@ func (s *K8sStore) GetCertificateExpiry(ctx context.Context, serverName string) 
 
 func (s *K8sStore) GetCertPool() *x509.CertPool {
 	return x509.NewCertPool() // Return empty pool as K8s store doesn't manage CA certs
-}
-
-func (s *K8sStore) GetTLSClientConfig(cert *tls.Certificate, opts TLSClientOptions) *tls.Config {
-	if opts.ServerName == "" {
-		// Use cert's common name as server name if not specified
-		if cert != nil && cert.Leaf != nil {
-			opts.ServerName = cert.Leaf.Subject.CommonName
-		}
-	}
-	
-	config := &tls.Config{
-		ServerName:         opts.ServerName,
-		InsecureSkipVerify: opts.InsecureSkipVerify,
-	}
-	
-	if cert != nil {
-		config.Certificates = []tls.Certificate{*cert}
-	}
-	
-	return config
-}
-
-func (s *K8sStore) GetTLSServerConfig(cert *tls.Certificate, opts TLSServerOptions) *tls.Config {
-	if opts.ClientAuth == tls.ClientAuthType(0) {
-		opts.ClientAuth = tls.RequireAndVerifyClientCert
-	}
-	
-	config := &tls.Config{
-		ClientAuth: opts.ClientAuth,
-	}
-	
-	if cert != nil {
-		config.Certificates = []tls.Certificate{*cert}
-	}
-	
-	return config
 }
 
 func (s *K8sStore) parseTLSSecret(secret *corev1.Secret) (*tls.Certificate, error) {

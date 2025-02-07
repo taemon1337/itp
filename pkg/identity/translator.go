@@ -32,7 +32,7 @@ type GroupMapping struct {
 type AuthMapping struct {
 	SourceField string // cn, org, ou, locality, country, state
 	SourceValue string
-	Auths      []string
+	Auths       []string
 }
 
 // Identity represents a translated identity
@@ -57,7 +57,7 @@ type Translator struct {
 	countryMappings map[string]string
 	stateMappings   map[string]string
 	autoMap         bool
-	
+
 	// Conditional role, group and auth mappings
 	roleMappings  []RoleMapping
 	groupMappings []GroupMapping
@@ -132,7 +132,7 @@ func (t *Translator) AddAuthMapping(sourceField, sourceValue string, auths []str
 	t.authMappings = append(t.authMappings, AuthMapping{
 		SourceField: t.normalizeFieldName(sourceField),
 		SourceValue: sourceValue,
-		Auths:      auths,
+		Auths:       auths,
 	})
 }
 
@@ -542,7 +542,7 @@ func (t *Translator) autoMapIdentity(cert *x509.Certificate) *Identity {
 		OrganizationUnit: cert.Subject.OrganizationalUnit,
 		Locality:         cert.Subject.Locality,
 		Country:          cert.Subject.Country,
-		State:           cert.Subject.Province,
+		State:            cert.Subject.Province,
 		Groups:           []string{},
 		Roles:            []string{},
 		Auths:            []string{},

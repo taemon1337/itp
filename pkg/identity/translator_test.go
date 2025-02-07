@@ -5,8 +5,8 @@ import (
 	"crypto/x509/pkix"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/itp/pkg/logger"
+	"github.com/stretchr/testify/assert"
 )
 
 // setupTestLogger creates a logger for testing
@@ -91,7 +91,7 @@ func TestAddMapping(t *testing.T) {
 
 func TestTranslateIdentity(t *testing.T) {
 	logger := setupTestLogger()
-	translator := NewTranslator(logger, true)  // Enable auto-mapping
+	translator := NewTranslator(logger, true) // Enable auto-mapping
 
 	// Add mappings
 	translator.AddMapping("CN", "test.com", "mapped.com")
@@ -133,9 +133,9 @@ func TestGetSubjectFromIdentity(t *testing.T) {
 				CommonName:       "test.com",
 				Organization:     []string{"TestOrg"},
 				OrganizationUnit: []string{"TestOU"},
-				Locality:        []string{"TestLocality"},
-				Country:         []string{"TestCountry"},
-				State:           []string{"TestState"},
+				Locality:         []string{"TestLocality"},
+				Country:          []string{"TestCountry"},
+				State:            []string{"TestState"},
 			},
 			want: "CN=test.com, O=TestOrg, OU=TestOU, L=TestLocality, ST=TestState, C=TestCountry",
 		},
@@ -178,7 +178,7 @@ func TestTranslator_ConditionalRoleMappings(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		cert         *x509.Certificate
+		cert          *x509.Certificate
 		expectedRoles []string
 	}{
 		{
@@ -258,7 +258,7 @@ func TestTranslator_ConditionalGroupMappings(t *testing.T) {
 	translator.AddGroupMapping("organization-unit", "engineering", []string{"eng-team", "builders"})
 
 	tests := []struct {
-		name            string
+		name           string
 		cert           *x509.Certificate
 		expectedGroups []string
 	}{
@@ -352,7 +352,7 @@ func TestTranslator_MixedMappings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
-	
+
 	assert.Equal(t, "internal-admin", identity.CommonName)
 	assert.Contains(t, identity.Organization, "internal-team")
 	assert.Contains(t, identity.Groups, "platform")
@@ -430,7 +430,7 @@ func TestTranslator_ConditionalAuthMappings(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		cert         *x509.Certificate
+		cert          *x509.Certificate
 		expectedAuths []string
 	}{
 		{

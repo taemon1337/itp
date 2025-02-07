@@ -7,193 +7,118 @@ import (
 	"os"
 	"strings"
 
-	"github.com/itp/pkg/logger"
 	"github.com/itp/pkg/proxy"
-	"github.com/itp/pkg/certstore"
-	"gopkg.in/yaml.v3"
 )
 
-// MappingRule defines a single identity mapping rule
-type MappingRule struct {
-	Source     string            `yaml:"source" json:"source"`           // "cn", "org", "ou"
-	Match      string            `yaml:"match" json:"match"`            // Value to match
-	Roles      []string          `yaml:"roles" json:"roles"`            // Roles to add
-	Groups     []string          `yaml:"groups" json:"groups"`          // Groups to add
-	Auths      []string          `yaml:"auths" json:"auths"`           // Auth values to add
-	Attributes map[string]string `yaml:"attributes" json:"attributes"`  // Other attributes to set
-}
-
-// HeaderRule defines header injection rules
-type HeaderRule struct {
-	Upstream string            `yaml:"upstream" json:"upstream"`
-	Headers  map[string]string `yaml:"headers" json:"headers"`
-}
-
-// Config holds all identity and header configuration
-type Config struct {
-	Rules   []MappingRule `yaml:"rules" json:"rules"`
-	Headers []HeaderRule  `yaml:"headers" json:"headers"`
-}
-
 func main() {
-	log.Printf("starting Identity Translation Proxy")
+	// Required flags
+	serverName := flag.String("server-name", "", "Server name for the proxy (e.g., proxy.example.com)")
+	externalDomain := flag.String("external-domain", "", "External domain for connections (e.g., external.com)")
+	internalDomain := flag.String("internal-domain", "", "Internal domain for connections (e.g., internal.local)")
 
-	// TLS configuration flags
-	certFile := flag.String("server-cert", "auto", "Server certificate file or 'auto' for auto-generated")
-	keyFile := flag.String("server-key", "auto", "Server key file or 'auto' for auto-generated")
-	caFile := flag.String("server-ca", "", "CA certificate file for server cert (only used with auto-generated certs)")
-	allowUnknownClients := flag.Bool("server-allow-unknown-client-certs", false, "Allow client certificates from unknown CAs")
-	mapAuto := flag.Bool("map-auto", false, "Automatically map client CN to upstream CN")
-	serverName := flag.String("server-name", "", "If generating server certificates, use this server name for TLS connection")
-	internalDomain := flag.String("internal-domain", "cluster.local", "Internal domain for inside/upstream connections (auto generated certs)")
-	externalDomain := flag.String("external-domain", "", "External domain for incoming connections, public domain")
-	addr := flag.String("addr", ":8443", "address for tls proxy server to listen on")
-	certStoreType := flag.String("cert-store", "auto", "Certificate store type (k8s or auto)")
-	echoName := flag.String("echo", "", "Name for the echo upstream (e.g. 'echo' to use in --route src=echo)")
-	echoAddr := flag.String("echo-addr", ":8444", "Address for echo upstream server")
-	echoSAN := flag.String("echo-san", "", "Additional DNS names for echo server certificate (comma-separated)")
-	serverSAN := flag.String("server-san", "", "Additional DNS names for server certificate (comma-separated)")
-	injectHeaders := flag.String("inject-header", "", "Inject headers in format upstream=name=template[,upstream=name=template,...] (e.g. 'backend=X-User=USER:{{.CommonName}};{{range .Groups}}ROLE:{{.}}{{end}}')")
-	injectHeadersUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers into upstream requests")
-	injectHeadersDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers into downstream responses")
-	addRole := flag.String("add-role", "", "Add roles in format field=value=role1,role2,... (e.g. 'cn=admin=admin,viewer')")
-	addAuth := flag.String("add-auth", "", "Add auth values in format field=value=auth1,auth2,... (e.g. 'cn=admin=read,write')")
+	// Optional flags
+	listenAddr := flag.String("listen", ":8443", "Address to listen on")
+	echoName := flag.String("echo-name", "", "Name for the echo server (defaults to echo.<internal-domain>)")
+	echoAddr := flag.String("echo-addr", ":8444", "Address for the echo server")
+	routes := flag.String("routes", "", "Comma-separated list of routes in the format src=dest (e.g., localhost=echo,app=app.internal)")
+	
+	// Certificate flags
+	certFile := flag.String("cert", "", "Path to certificate file")
+	keyFile := flag.String("key", "", "Path to private key file")
+	caFile := flag.String("ca", "", "Path to CA certificate file")
 
-	// Configuration flags
-	configFile := flag.String("config", "", "Path to YAML configuration file for identity mappings and headers")
-	routes := flag.String("route", "", "Static routes in format src=dest[,src=dest,...]")
-	routeViaDNS := flag.Bool("route-via-dns", false, "Allow routing to unspecified destinations via DNS")
+	// Security flags
+	allowUnknownCerts := flag.Bool("allow-unknown-certs", false, "Allow unknown client certificates")
+	routeViaDNS := flag.Bool("route-via-dns", false, "Enable DNS-based routing")
+	autoMapCN := flag.Bool("auto-map-cn", true, "Automatically map CommonName")
+
+	// Header injection flags
+	injectUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers upstream")
+	injectDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers downstream")
+	injectHeader := flag.String("inject-header", "", "Header template in format 'upstream=header=template' (e.g., 'localhost=X-User={{.CommonName}}')")
+	addRoleMapping := flag.String("add-role", "", "Role mapping in format 'cn=value=role1,role2' (e.g., 'cn=admin=admin-role')")
+	addAuthMapping := flag.String("add-auth", "", "Auth mapping in format 'cn=value=auth1,auth2' (e.g., 'cn=*=read,write')")
 
 	flag.Parse()
 
-	// Create proxy configuration
-	config := &proxy.Config{
-		CertFile:           *certFile,
-		KeyFile:            *keyFile,
-		CAFile:            *caFile,
-		ServerName:        *serverName,
-		InternalDomain:    *internalDomain,
-		ExternalDomain:    *externalDomain,
-		AllowUnknownCerts: *allowUnknownClients,
-		ListenAddr:        *addr,
-		EchoName:         *echoName,
-		EchoAddr:         *echoAddr,
-		RouteViaDNS:      *routeViaDNS,
-		AutoMapCN:        *mapAuto,
-		CertStoreType:    *certStoreType,
-		ProxyLogger:      logger.New("proxy", logger.LevelInfo),
-		RouterLogger:     logger.New("router", logger.LevelInfo),
-		TranslatorLogger: logger.New("translator", logger.LevelInfo),
-		EchoLogger:      logger.New("echo", logger.LevelInfo),
-		InjectHeadersUpstream: *injectHeadersUpstream,
-		InjectHeadersDownstream: *injectHeadersDownstream,
-		CertOptions: certstore.CertificateOptions{
-			DNSNames: append([]string{*serverName}, strings.Split(*serverSAN, ",")...),
-		},
-		EchoCertOptions: certstore.CertificateOptions{
-			CommonName: *echoName,
-			DNSNames:   append([]string{"localhost", *echoName}, strings.Split(*echoSAN, ",")...),
-		},
+	// Validate required flags
+	if *serverName == "" || *externalDomain == "" || *internalDomain == "" {
+		fmt.Println("Error: server-name, external-domain, and internal-domain are required")
+		flag.Usage()
+		os.Exit(1)
 	}
 
-	// Create proxy instance
-	p, err := proxy.New(config)
+	// Create base config
+	config := proxy.NewProxyConfig(*serverName, *externalDomain, *internalDomain)
+
+	// Configure optional settings
+	config.ListenAddr = *listenAddr
+	config.EchoAddr = *echoAddr
+
+	// Configure echo server if name provided
+	if *echoName != "" {
+		config.WithEchoServer(*echoName)
+	}
+
+	// Configure certificates if provided
+	if *certFile != "" || *keyFile != "" || *caFile != "" {
+		config.WithCertificates(*certFile, *keyFile, *caFile)
+	}
+
+	// Configure security settings
+	if *allowUnknownCerts {
+		config.WithInsecureSkipVerify()
+	}
+	if *routeViaDNS {
+		config.WithDNSRouting()
+	}
+	config.AutoMapCN = *autoMapCN
+
+	// Configure header injection
+	config.WithHeaderInjection(*injectUpstream, *injectDownstream)
+
+	// Create and start proxy
+	p, err := proxy.NewProxy(config)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
 
-	// Add routes
+	// Add routes if provided
 	if *routes != "" {
 		p.AddRoutes(*routes)
 	}
 
-	// Add role mappings
-	if *addRole != "" {
-		parts := strings.SplitN(*addRole, "=", 3)
-		if len(parts) != 3 {
-			log.Fatalf("Invalid role mapping format: %s", *addRole)
-		}
-		field, value, roles := parts[0], parts[1], strings.Split(parts[2], ",")
-		p.Translator().AddRoleMapping(field, value, roles)
-	}
-
-	// Add auth mappings
-	if *addAuth != "" {
-		parts := strings.SplitN(*addAuth, "=", 3)
-		if len(parts) != 3 {
-			log.Fatalf("Invalid auth mapping format: %s", *addAuth)
-		}
-		field, value, auths := parts[0], parts[1], strings.Split(parts[2], ",")
-		p.Translator().AddAuthMapping(field, value, auths)
-	}
-
-	// Add header injection rules
-	if *injectHeaders != "" {
-		for _, rule := range strings.Split(*injectHeaders, ",") {
-			parts := strings.SplitN(rule, "=", 3)
-			if len(parts) != 3 {
-				log.Fatalf("Invalid header injection rule format: %s", rule)
-			}
-			upstream, name, template := parts[0], parts[1], parts[2]
-			if err := p.AddHeader(upstream, name, template); err != nil {
-				log.Fatalf("Failed to add header injection rule: %v", err)
+	// Add header templates if provided
+	if *injectHeader != "" {
+		parts := strings.SplitN(*injectHeader, "=", 3)
+		if len(parts) == 3 {
+			upstream, header, template := parts[0], parts[1], parts[2]
+			if err := p.AddHeader(upstream, header, template); err != nil {
+				log.Printf("Warning: failed to add header template: %v", err)
 			}
 		}
 	}
 
-	// Apply configuration from file or flags
-	if *configFile != "" {
-		var cfg Config
-		data, err := os.ReadFile(*configFile)
-		if err != nil {
-			log.Fatalf("Failed to read config file: %v", err)
-		}
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			log.Fatalf("Failed to parse config file: %v", err)
-		}
-		if err := applyConfig(p, &cfg); err != nil {
-			log.Fatalf("Failed to apply config: %v", err)
+	// Add role mappings if provided
+	if *addRoleMapping != "" {
+		parts := strings.SplitN(*addRoleMapping, "=", 3)
+		if len(parts) == 3 {
+			roles := strings.Split(parts[2], ",")
+			p.Translator().AddRoleMapping(parts[0], parts[1], roles)
 		}
 	}
 
-	// Start proxy server
+	// Add auth mappings if provided
+	if *addAuthMapping != "" {
+		parts := strings.SplitN(*addAuthMapping, "=", 3)
+		if len(parts) == 3 {
+			auths := strings.Split(parts[2], ",")
+			p.Translator().AddAuthMapping(parts[0], parts[1], auths)
+		}
+	}
+
+	log.Printf("Starting proxy server on %s", config.ListenAddr)
 	if err := p.ListenAndServe(config); err != nil {
-		log.Fatalf("Failed to start proxy server: %v", err)
+		log.Fatalf("Proxy server failed: %v", err)
 	}
-}
-
-func applyConfig(p *proxy.Proxy, cfg *Config) error {
-	// Apply identity mappings
-	for _, rule := range cfg.Rules {
-		// Add roles if specified
-		if len(rule.Roles) > 0 {
-			p.Translator().AddRoleMapping(rule.Source, rule.Match, rule.Roles)
-		}
-
-		// Add groups if specified
-		if len(rule.Groups) > 0 {
-			p.Translator().AddGroupMapping(rule.Source, rule.Match, rule.Groups)
-		}
-
-		// Add auths if specified
-		if len(rule.Auths) > 0 {
-			p.Translator().AddAuthMapping(rule.Source, rule.Match, rule.Auths)
-		}
-
-		// Add attribute mappings if specified
-		for k, v := range rule.Attributes {
-			p.Translator().AddMapping(rule.Source, k, v)
-		}
-	}
-
-	// Apply header templates
-	for _, rule := range cfg.Headers {
-		for headerName, template := range rule.Headers {
-			if err := p.AddHeader(rule.Upstream, headerName, template); err != nil {
-				return fmt.Errorf("failed to add header template: %v", err)
-			}
-		}
-	}
-
-	return nil
 }

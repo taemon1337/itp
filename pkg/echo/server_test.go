@@ -4,8 +4,8 @@ import (
 	"crypto/tls"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/itp/pkg/logger"
+	"github.com/stretchr/testify/assert"
 )
 
 // setupTestLogger creates a logger for testing
@@ -16,7 +16,7 @@ func setupTestLogger() *logger.Logger {
 func TestNew(t *testing.T) {
 	cert := &tls.Certificate{}
 	name := "echo.test"
-	
+
 	server := New(cert, nil, name)
 	assert.NotNil(t, server)
 	assert.Equal(t, cert, server.cert)

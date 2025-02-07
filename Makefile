@@ -4,10 +4,20 @@ DOCKER_IMAGE=taemon1337/itp
 VERSION?=1.0.0
 BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 COMMIT_SHA?=$(shell git rev-parse --short HEAD)
-DOCKER_BUILD_IMAGE=golang:1.23-alpine
-DOCKER_LINT_IMAGE=golangci/golangci-lint:v1.63.4
+GO_DOCKER_IMAGE=golang:1.23-alpine
 
-# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
+# Docker BuildKit settings
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
+# Docker run command with common options
+DOCKER_GO_RUN=docker run --rm \
+	-v $(PWD):/app \
+	-v go-cache:/root/.cache/go-build \
+	-v go-mod-cache:/go/pkg/mod \
+	-w /app \
+	$(GO_DOCKER_IMAGE)
+
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
@@ -18,154 +28,97 @@ help: ## Display this help message
 
 .PHONY: clean
 clean: ## Clean build artifacts
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "rm -f $(BINARY_NAME)"
+	rm -f $(BINARY_NAME)
+	rm -f *.crt *.key
 
 .PHONY: deps
 deps: ## Download dependencies
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go mod download"
+	$(DOCKER_GO_RUN) go mod download
 
 .PHONY: tidy
 tidy: ## Tidy go modules
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go mod tidy"
+	$(DOCKER_GO_RUN) go mod tidy
 
 .PHONY: fmt
 fmt: ## Run go fmt
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "go fmt ./..."
+	$(DOCKER_GO_RUN) go fmt ./...
 
 .PHONY: vet
 vet: ## Run go vet
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go vet ./..."
+	$(DOCKER_GO_RUN) go vet ./...
 
 .PHONY: lint
 lint: ## Run golangci-lint
 	docker run --rm \
 		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
+		-v go-cache:/root/.cache/go-build \
+		-v go-mod-cache:/go/pkg/mod \
 		-w /app \
-		$(DOCKER_LINT_IMAGE) golangci-lint run --timeout 5m
+		golangci/golangci-lint:v1.63.4 golangci-lint run
 
 .PHONY: test
-test: deps ## Run tests with coverage
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -coverprofile=coverage.out -covermode=count ./..."
-
-.PHONY: test-short
-test-short: deps ## Run tests in short mode (skip long tests)
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -short ./..."
-
-.PHONY: test-nocache
-test-nocache: deps ## Run tests without cache
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go test -v -count=1 -coverprofile=coverage.out -covermode=count ./..."
-
-.PHONY: coverage
-coverage: test ## Generate test coverage report
-	docker run --rm \
-		-v $(PWD):/app \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "go tool cover -html=coverage.out -o coverage.html && go tool cover -func=coverage.out"
-
-.PHONY: test-ci
-test-ci: lint test coverage ## Run all tests and generate coverage report (CI mode)
+test: ## Run tests
+	$(DOCKER_GO_RUN) go test -v ./...
 
 .PHONY: build
-build: ## Build binary using Docker
-	docker run --rm \
-		-v $(PWD):/app \
-		-v $(HOME)/.cache/go-build:/root/.cache/go-build \
-		-v $(HOME)/.cache/go-mod:/go/pkg/mod \
-		-w /app \
-		$(DOCKER_BUILD_IMAGE) sh -c "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BINARY_NAME) -ldflags='-w -s -X main.version=$(VERSION)' ."
+build: ## Build binary
+	$(DOCKER_GO_RUN) go build \
+		-ldflags="-w -s \
+		-X main.version=${VERSION} \
+		-X main.buildDate=${BUILD_DATE} \
+		-X main.commitSha=${COMMIT_SHA}" \
+		-o $(BINARY_NAME)
 
 .PHONY: docker-build
-docker-build: docker-build-distroless docker-build-alpine ## Build all Docker images
-
-.PHONY: docker-build-distroless
-docker-build-distroless: ## Build Distroless Docker image
-	docker build --target distroless \
+docker-build: ## Build docker image
+	docker build \
 		--build-arg VERSION=$(VERSION) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		--build-arg COMMIT_SHA=$(COMMIT_SHA) \
-		-t $(DOCKER_IMAGE):$(VERSION)-distroless \
-		-t $(DOCKER_IMAGE):latest-distroless \
-		.
-
-.PHONY: docker-build-alpine
-docker-build-alpine: ## Build Alpine Docker image
-	docker build --target alpine \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		--build-arg COMMIT_SHA=$(COMMIT_SHA) \
-		-t $(DOCKER_IMAGE):$(VERSION)-alpine \
-		-t $(DOCKER_IMAGE):latest-alpine \
-		.
+		-t $(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_IMAGE):latest .
 
 .PHONY: docker-push
-docker-push: docker-push-distroless docker-push-alpine ## Push all Docker images
-
-.PHONY: docker-push-distroless
-docker-push-distroless: ## Push Distroless Docker image
-	docker push $(DOCKER_IMAGE):$(VERSION)-distroless
-	docker push $(DOCKER_IMAGE):latest-distroless
-
-.PHONY: docker-push-alpine
-docker-push-alpine: ## Push Alpine Docker image
-	docker push $(DOCKER_IMAGE):$(VERSION)-alpine
-	docker push $(DOCKER_IMAGE):latest-alpine
-
-.PHONY: run
-run: ## Run the application in Docker
-	docker-compose up --build
-
-.PHONY: dev
-dev: ## Run the application in development mode with live reload
-	docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+docker-push: ## Push docker image
+	docker push $(DOCKER_IMAGE):$(VERSION)
+	docker push $(DOCKER_IMAGE):latest
 
 .PHONY: generate-certs
 generate-certs: ## Generate development certificates
-	docker run --rm -v $(PWD):/app -w /app $(DOCKER_BUILD_IMAGE) sh -c "\
+	docker run --rm \
+		-v $(PWD):/app \
+		-w /app \
+		$(GO_DOCKER_IMAGE) sh -c "\
 		apk add --no-cache openssl && \
 		openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost' && \
 		cp server.crt ca.crt"
 
-.PHONY: echo
-echo: ## Run itp with echo
-	docker run --rm \
-	-v $(PWD):/app -w /app \
-	-p 8443:8443 $(DOCKER_BUILD_IMAGE) \
-	sh -c "./itp --echo echo --server-allow-unknown-client-certs --route localhost=echo --map-auto --external-domain external.com --inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' --inject-headers-upstream --add-role 'cn=curler=echo-user' --add-auth 'cn=*=read,write'"
-
 .PHONY: all
-all: clean deps fmt vet lint test build ## Run all tasks (clean, deps, fmt, vet, lint, test, build)
+all: clean deps fmt vet lint test build ## Run all build steps
 
-.PHONY: ci
-ci: deps fmt vet lint test build ## Run CI tasks (deps, fmt, vet, lint, test, build)
+.PHONY: docker-all
+docker-all: all docker-build ## Build everything including docker image
+
+.PHONY: echo
+echo:
+	docker run --rm \
+	-p 8443:8443 \
+	$(DOCKER_IMAGE):$(VERSION) \
+		--server-name proxy \
+		--internal-domain internal.com \
+		--external-domain external.com \
+		--echo-name echo \
+		--allow-unknown-certs \
+		--routes localhost=echo \
+		--auto-map-cn \
+		--external-domain external.com \
+		--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \
+		--inject-headers-upstream \
+		--add-role 'cn=curler=echo-user' \
+		--add-auth 'cn=*=read,write'
+
+# Create Docker volumes for caching if they don't exist
+.PHONY: init
+init: ## Initialize Docker volumes for caching
+	docker volume create go-cache
+	docker volume create go-mod-cache
