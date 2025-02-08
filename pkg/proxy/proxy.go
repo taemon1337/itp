@@ -307,6 +307,8 @@ func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message str
 func (p *Proxy) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	ident := &identity.Identity{}
+
 	// Since we use tls.Listen, conn is already a *tls.Conn
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
@@ -315,20 +317,39 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		return
 	}
 
-	// Get connection state and verify client certificate
+	// Get connection state and verify client certificate if required
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
-		p.proxyLogger.Error("No client certificate provided")
-		p.handleErrorConnection(conn, http.StatusBadRequest, "client certificate required")
-		return
+		if !p.allowUnknownCerts {
+			p.proxyLogger.Error("No client certificate provided")
+			p.handleErrorConnection(conn, http.StatusBadRequest, "client certificate required")
+			return
+		}
+		// Create a default identity for unknown clients
+		ident = &identity.Identity{
+			CommonName: "unknown",
+			Roles:      []string{"anonymous"},
+		}
+		p.proxyLogger.Debug("No client certificate provided, using default identity: %v", ident)
 	}
 
-	// Translate identity from certificate
-	ident, err := p.translator.TranslateIdentity(state.PeerCertificates[0])
-	if err != nil {
-		p.proxyLogger.Error("Failed to translate identity: %v", err)
-		p.handleErrorConnection(conn, http.StatusBadRequest, "identity translation failed")
-		return
+	// Translate identity from certificate if one was provided
+	if len(state.PeerCertificates) > 0 {
+		var err error
+		ident, err = p.translator.TranslateIdentity(state.PeerCertificates[0])
+		if err != nil {
+			if !p.allowUnknownCerts {
+				p.proxyLogger.Error("Failed to translate identity: %v", err)
+				p.handleErrorConnection(conn, http.StatusBadRequest, "identity translation failed")
+				return
+			}
+			// Fall back to default identity if translation fails and we allow unknown certs
+			ident = &identity.Identity{
+				CommonName: state.PeerCertificates[0].Subject.CommonName,
+				Roles:      []string{"anonymous"},
+			}
+			p.proxyLogger.Debug("Identity translation failed, using cert CN as identity: %v", ident)
+		}
 	}
 
 	// Get server name from TLS state
@@ -678,18 +699,23 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 	serverCert = cert
 
 	// Configure client auth based on allowUnknownCerts setting
+	// Set up client certificate verification
 	clientAuth := tls.RequireAndVerifyClientCert
+	var clientCAs *x509.CertPool
 	if p.allowUnknownCerts {
-		p.proxyLogger.Info("Client certificate verification disabled - accepting any client certificate")
-		clientAuth = tls.RequireAnyClientCert
+		p.proxyLogger.Info("Client certificate verification disabled - accepting connections without certificates")
+		clientAuth = tls.RequestClientCert // Allow but don't require client certs
+		clientCAs = nil // Don't verify against any CA pool
+	} else {
+		clientCAs = p.serverCertStore.GetCertPool() // Verify against server CA pool
 	}
 
 	// Configure TLS
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*serverCert},
 		ClientAuth:   clientAuth,
-		RootCAs:     p.internalCertStore.GetCertPool(), // verify upstream connections against internal CA
-		ClientCAs:   p.serverCertStore.GetCertPool(), // verify client certs against server|external domain's CA
+		ClientCAs:    clientCAs,     // CA pool for verifying client certs (nil if allowUnknownCerts)
+		RootCAs:      p.internalCertStore.GetCertPool(), // CA pool for verifying upstream server certs
 	}
 
 	// Configure client certificate verification

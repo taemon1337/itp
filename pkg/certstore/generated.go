@@ -78,7 +78,10 @@ func (s *GeneratedStore) generateCA() error {
 			// Set validity period with small backdating for clock skew
 			NotBefore:             time.Now().Add(-1 * time.Hour),
 			NotAfter:              time.Now().Add(s.options.DefaultTTL),
-			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			// CA certs need KeyUsageCertSign to sign other certs
+			// KeyUsageDigitalSignature for signing CRLs and OCSP responses
+			// KeyUsageKeyEncipherment for encrypting private keys
+			KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageKeyEncipherment,
 			BasicConstraintsValid: true,
 			IsCA:                  true,
 			MaxPathLen:            1,
