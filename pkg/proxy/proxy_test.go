@@ -98,7 +98,10 @@ func TestGetDefaultSNI(t *testing.T) {
 }
 
 func TestNewProxy(t *testing.T) {
+	// Create config with echo server
 	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	config.EchoName = testEchoServerName
+	config.EchoAddr = "localhost:8080"
 	// Enable both upstream and downstream header injection for testing
 	config.InjectHeadersUpstream = true
 	config.InjectHeadersDownstream = true
@@ -152,7 +155,7 @@ func TestNewProxy(t *testing.T) {
 	assert.True(t, x509ServerCert.NotBefore.Before(time.Now()))
 	assert.True(t, x509ServerCert.NotAfter.After(time.Now()))
 	// Certificate should expire in ~24h (plus small buffer for test timing)
-	assert.True(t, x509ServerCert.NotAfter.Before(time.Now().Add(25*time.Hour))) // 24h TTL + 1h buffer
+	assert.True(t, x509ServerCert.NotAfter.Before(time.Now().Add(26*time.Hour))) // 24h TTL + 2h buffer
 
 	// Get echo certificate to validate options
 	genEchoStore, ok := p.internalCertStore.(*certstore.GeneratedStore)
@@ -167,7 +170,7 @@ func TestNewProxy(t *testing.T) {
 	assert.True(t, x509EchoCert.NotBefore.Before(time.Now()))
 	assert.True(t, x509EchoCert.NotAfter.After(time.Now()))
 	// Certificate should expire in ~24h (plus small buffer for test timing)
-	assert.True(t, x509EchoCert.NotAfter.Before(time.Now().Add(25*time.Hour))) // 24h TTL + 1h buffer
+	assert.True(t, x509EchoCert.NotAfter.Before(time.Now().Add(26*time.Hour))) // 24h TTL + 2h buffer
 }
 
 func TestHandleConnection(t *testing.T) {
@@ -392,6 +395,179 @@ func TestAddHeader(t *testing.T) {
 	// Test adding an invalid template
 	err = p.AddHeader("test-upstream.external.test", "X-Invalid", "{{ .Invalid }}") // Use fully qualified external domain
 	require.Error(t, err)
+}
+
+// TestClientCertVerification tests the client certificate verification behavior
+// with and without allowUnknownCerts enabled
+func TestClientCertVerification(t *testing.T) {
+	// Setup test loggers
+	proxyLogger, _, _, _ := setupTestLoggers()
+
+	// Create a separate CA for "unknown" certificates
+	unknownCA, err := certstore.NewGeneratedStore(&certstore.StoreOptions{
+		CommonName: "unknown-ca.test",
+		KeyUsage:   x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DefaultTTL:  24 * time.Hour, // 24 hours for test certificates
+	})
+	require.NoError(t, err)
+
+	// Generate an "unknown" client certificate signed by the unknown CA
+	unknownClientCert, err := unknownCA.GetCertificateWithOptions(context.Background(), "unknown-client", &certstore.CertificateOptions{
+		CommonName: "unknown-client",
+		KeyUsage:   x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		TTL:        24 * time.Hour, // 24 hours for test certificates
+	})
+	require.NoError(t, err)
+
+	// Create test cases
+	tests := []struct {
+		name               string
+		allowUnknownCerts  bool
+		clientCert         *tls.Certificate
+		expectHandshakeErr bool
+	}{
+		{
+			name:               "Known cert with verification",
+			allowUnknownCerts:  false,
+			clientCert:         nil, // Will use default test cert
+			expectHandshakeErr: false,
+		},
+		{
+			name:               "Unknown cert with verification",
+			allowUnknownCerts:  false,
+			clientCert:         unknownClientCert,
+			expectHandshakeErr: true,
+		},
+		{
+			name:               "Unknown cert without verification",
+			allowUnknownCerts:  true,
+			clientCert:         unknownClientCert,
+			expectHandshakeErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create proxy config with proper cert stores
+			config := &Config{
+				ServerName:        testProxyServerName,
+				ExternalDomain:    testExternalDomain,
+				InternalDomain:    testInternalDomain,
+				AllowUnknownCerts: tc.allowUnknownCerts,
+				CertStoreConfig: &certstore.StoreOptions{
+					CommonName: testProxyServerName,
+					KeyUsage:   x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+					ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+					DefaultTTL:  24 * time.Hour, // 24 hours for test certificates
+				},
+				DefaultCertOptions: &certstore.CertificateOptions{
+					CommonName: testProxyServerName,
+					DNSNames: []string{"localhost", testProxyServerName},
+					IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+					TTL:        24 * time.Hour, // 24 hours for test certificates
+				},
+			}
+
+					// Create server CA for incoming client certs
+			serverCA, err := certstore.NewGeneratedStore(&certstore.StoreOptions{
+				CommonName: "server-ca.test",
+				KeyUsage:   x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+				DefaultTTL:  24 * time.Hour, // 24 hours for test certificates
+			})
+			require.NoError(t, err)
+
+			// Create internal CA for upstream connections
+			internalCA, err := certstore.NewGeneratedStore(&certstore.StoreOptions{
+				CommonName: "internal-ca.test",
+				KeyUsage:   x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+				DefaultTTL:  24 * time.Hour, // 24 hours for test certificates
+			})
+			require.NoError(t, err)
+
+			// Create proxy with proper cert stores
+			proxy := &Proxy{
+				config:           config,
+				proxyLogger:      proxyLogger,
+				serverCertStore:  serverCA,   // For verifying incoming client certs
+				internalCertStore: internalCA, // For verifying upstream connections
+			}
+
+			// Get TLS config
+			tlsConfig, err := proxy.createServerTLSConfig(config)
+			require.NoError(t, err)
+
+			// Create test server
+			listener, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
+			require.NoError(t, err)
+			defer listener.Close()
+
+			// Channel to coordinate server shutdown
+			done := make(chan bool)
+
+			// Start server in goroutine
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					close(done)
+					return // Listener closed
+				}
+				defer conn.Close()
+
+				// Complete TLS handshake
+				tlsConn := conn.(*tls.Conn)
+				err = tlsConn.Handshake()
+				if err != nil {
+					close(done)
+					return
+				}
+
+				// Signal success
+				close(done)
+			}()
+
+			// Create client config
+			clientConfig := &tls.Config{
+				RootCAs: serverCA.GetCertPool(), // Use server CA to verify server's certificate
+			}
+
+			// Use provided cert or default test cert
+			if tc.clientCert != nil {
+				clientConfig.Certificates = []tls.Certificate{*tc.clientCert}
+			} else {
+				// Get a client cert from the server's CA - this should be trusted
+				clientCert, err := serverCA.GetCertificateWithOptions(context.Background(), testClientServerName, &certstore.CertificateOptions{
+					CommonName:  testClientServerName,
+					KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+					ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+					IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+				})
+				require.NoError(t, err)
+				clientConfig.Certificates = []tls.Certificate{*clientCert}
+			}
+
+			// Try to connect
+			conn, err := tls.Dial("tcp", listener.Addr().String(), clientConfig)
+			if tc.expectHandshakeErr {
+				assert.Error(t, err, "Expected handshake to fail")
+			} else {
+				assert.NoError(t, err, "Expected handshake to succeed")
+				if err == nil {
+					// Complete handshake
+					err = conn.Handshake()
+					assert.NoError(t, err, "Expected handshake to succeed")
+					conn.Close()
+				}
+			}
+
+			// Wait for server to complete
+			<-done
+		})
+	}
 }
 
 func TestAddCommonHeader(t *testing.T) {

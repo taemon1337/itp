@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"sync"
@@ -120,20 +121,24 @@ func (s *GeneratedStore) generateCertificate(serverName string, opts *Certificat
 		return nil, fmt.Errorf("failed to generate serial number: %v", err)
 	}
 
-	// Compute certificate validity period
-	now := time.Now()
+	// Get TTL from options or default
 	ttl := opts.TTL
 	if ttl == 0 {
 		ttl = s.options.DefaultTTL
 	}
+	log.Printf("Initial TTL: %v", ttl)
+
+	// Compute validity period with clock skew buffers
+	notBefore, notAfter := ComputeValidityPeriod(ttl)
+	log.Printf("Generating certificate for %s with TTL=%v: NotBefore=%v, NotAfter=%v", serverName, ttl, notBefore, notAfter)
 
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			CommonName: serverName,
 		},
-		NotBefore:             now.Add(-1 * time.Hour), // Small backdating for clock skew
-		NotAfter:              now.Add(ttl),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              opts.KeyUsage,
 		ExtKeyUsage:           opts.ExtKeyUsage,
 		BasicConstraintsValid: true,
@@ -355,6 +360,17 @@ func (s *GeneratedStore) GetCACertificate() *x509.Certificate {
 // GetCAPrivateKey returns the CA private key used by this store
 func (s *GeneratedStore) GetCAPrivateKey() *rsa.PrivateKey {
 	return s.caKey
+}
+
+// ClearCache clears the certificate cache and regenerates the CA certificate
+func (s *GeneratedStore) ClearCache() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cache = make(map[string]*tls.Certificate)
+	// Force regenerate CA
+	s.options.CAKey = nil
+	s.options.CACert = nil
+	return s.generateCA()
 }
 
 

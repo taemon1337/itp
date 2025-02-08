@@ -38,12 +38,67 @@ func TestNewRouter(t *testing.T) {
 }
 
 func TestSetEchoUpstream(t *testing.T) {
-	logger := setupTestLogger()
-	r := NewRouter(logger, false)
-	r.SetEchoUpstream("echo.test", "localhost:8080")
-	name, addr := r.GetEchoUpstream()
-	assert.Equal(t, "echo.test", name)
-	assert.Equal(t, "localhost:8080", addr)
+	tests := []struct {
+		name           string
+		echoName       string
+		echoAddr       string
+		expectedName   string
+		expectedAddr   string
+		existingRoutes map[string]string
+	}{
+		{
+			name:         "simple echo setup",
+			echoName:     "echo.test",
+			echoAddr:     "localhost:8080",
+			expectedName: "echo.test",
+			expectedAddr: "localhost:8080",
+		},
+		{
+			name:     "echo with existing routes",
+			echoName: "echo.test",
+			echoAddr: "localhost:8080",
+			existingRoutes: map[string]string{
+				"other.test": "other:8080",
+			},
+			expectedName: "echo.test",
+			expectedAddr: "localhost:8080",
+		},
+		{
+			name:     "multiple echo endpoints",
+			echoName: "echo2.test",
+			echoAddr: "localhost:8082",
+			existingRoutes: map[string]string{
+				"echo1.test": "localhost:8081",
+			},
+			expectedName: "echo1.test",
+			expectedAddr: "localhost:8081",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := setupTestLogger()
+			r := NewRouter(logger, false)
+
+			// Add any existing routes
+			for k, v := range tt.existingRoutes {
+				r.AddStaticRoute(k, v)
+			}
+
+			// Set the echo upstream
+			r.SetEchoUpstream(tt.echoName, tt.echoAddr)
+
+			// Verify the route was added
+			dest, ok := r.staticRoutes[tt.echoName]
+			assert.True(t, ok)
+			assert.Equal(t, tt.echoAddr, dest)
+
+			// Get echo upstream and verify
+			name, addr := r.GetEchoUpstream()
+			assert.Equal(t, tt.expectedName, name)
+			assert.Equal(t, tt.expectedAddr, addr)
+		})
+	}
 }
 
 func TestResolveDestination(t *testing.T) {
@@ -51,17 +106,16 @@ func TestResolveDestination(t *testing.T) {
 		name          string
 		serverName    string
 		staticRoutes  map[string]string
-		echoName      string
-		echoAddr      string
 		useDNS        bool
 		expectedDest  string
 		expectedError string
 	}{
 		{
-			name:         "echo upstream direct",
+			name:         "direct route",
 			serverName:   "echo.test",
-			echoName:     "echo.test",
-			echoAddr:     "localhost:8080",
+			staticRoutes: map[string]string{
+				"echo.test": "localhost:8080",
+			},
 			expectedDest: "localhost:8080",
 		},
 		{
@@ -73,13 +127,12 @@ func TestResolveDestination(t *testing.T) {
 			expectedDest: "10.0.0.1:443",
 		},
 		{
-			name:       "static route to echo",
+			name:       "chained route",
 			serverName: "example.com",
 			staticRoutes: map[string]string{
 				"example.com": "echo.test",
+				"echo.test":   "localhost:8080",
 			},
-			echoName:     "echo.test",
-			echoAddr:     "localhost:8080",
 			expectedDest: "localhost:8080",
 		},
 		{
@@ -112,7 +165,6 @@ func TestResolveDestination(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := setupTestLogger()
 			r := NewRouter(logger, tt.useDNS)
-			r.SetEchoUpstream(tt.echoName, tt.echoAddr)
 
 			for src, dest := range tt.staticRoutes {
 				r.AddStaticRoute(src, dest)

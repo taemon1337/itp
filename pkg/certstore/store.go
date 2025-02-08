@@ -72,8 +72,6 @@ type Store interface {
 
 	// GetCAPrivateKey returns the CA private key used by this store
 	GetCAPrivateKey() *rsa.PrivateKey
-
-
 }
 
 // cachedCert represents a cached certificate with its expiry time

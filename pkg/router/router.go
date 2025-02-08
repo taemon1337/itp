@@ -11,8 +11,6 @@ import (
 type Router struct {
 	useDNS       bool
 	staticRoutes map[string]string
-	echoName     string
-	echoAddr     string
 	logger       *logger.Logger
 }
 
@@ -25,34 +23,35 @@ func NewRouter(logger *logger.Logger, useDNS bool) *Router {
 	}
 }
 
-// SetEchoUpstream configures the echo upstream with a name and address
+// SetEchoUpstream configures the echo upstream with a name and address.
+// This adds a static route from the echo name to its address.
 func (r *Router) SetEchoUpstream(name, addr string) {
-	r.echoName = name
-	r.echoAddr = addr
+	r.staticRoutes[name] = addr
 	r.logger.Info("Echo upstream configured with name=%s addr=%s", name, addr)
 }
 
-// GetEchoUpstream returns the echo upstream name and address
+// GetEchoUpstream returns the echo upstream name and address.
+// The name will be the first key found that maps to an echo address.
 func (r *Router) GetEchoUpstream() (string, string) {
-	return r.echoName, r.echoAddr
+	for name, addr := range r.staticRoutes {
+		// Consider it an echo endpoint if the name is used as a destination
+		if _, exists := r.staticRoutes[addr]; !exists {
+			return name, addr
+		}
+	}
+	return "", ""
 }
 
 // ResolveDestination resolves the final destination for a server name
 func (r *Router) ResolveDestination(serverName string) (string, error) {
 	r.logger.Debug("Resolving destination for server name: %s", serverName)
 
-	// Check if destination is the echo upstream
-	if r.echoName != "" && serverName == r.echoName {
-		r.logger.Debug("Using echo upstream for %s -> %s", serverName, r.echoAddr)
-		return r.echoAddr, nil
-	}
-
 	// Check static routes first
 	if dest, ok := r.staticRoutes[serverName]; ok {
-		// Check if route points to echo upstream
-		if r.echoName != "" && dest == r.echoName {
-			r.logger.Debug("Static route %s points to echo upstream -> %s", serverName, r.echoAddr)
-			return r.echoAddr, nil
+		// If dest is another static route, follow it
+		if finalDest, ok := r.staticRoutes[dest]; ok {
+			r.logger.Debug("Following static route %s -> %s -> %s", serverName, dest, finalDest)
+			return finalDest, nil
 		}
 		r.logger.Debug("Using static route %s -> %s", serverName, dest)
 		return dest, nil

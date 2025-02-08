@@ -103,6 +103,8 @@ docker-all: all docker-build ## Build everything including docker image
 echo:
 	docker run --rm \
 	-p 8443:8443 \
+	-v /etc/timezone:/etc/timezone:ro \
+	-v /etc/localtime:/etc/localtime:ro \
 	$(DOCKER_IMAGE):$(VERSION) \
 		--server-name proxy \
 		--internal-domain internal.com \
@@ -116,6 +118,22 @@ echo:
 		--inject-headers-upstream \
 		--add-role 'cn=curler=echo-user' \
 		--add-auth 'cn=*=read,write'
+
+.PHONY: echobin
+echobin:
+	./$(BINARY_NAME) \
+	--server-name proxy \
+	--internal-domain internal.com \
+	--external-domain external.com \
+	--echo-name echo \
+	--allow-unknown-certs \
+	--routes localhost=echo \
+	--auto-map-cn \
+	--external-domain external.com \
+	--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \
+	--inject-headers-upstream \
+	--add-role 'cn=curler=echo-user' \
+	--add-auth 'cn=*=read,write'
 
 # Create Docker volumes for caching if they don't exist
 .PHONY: init

@@ -66,16 +66,11 @@ func main() {
 	}
 
 	// Configure security settings
-	if *allowUnknownCerts {
-		config.WithInsecureSkipVerify()
-	}
-	if *routeViaDNS {
-		config.WithDNSRouting()
-	}
+	config.AllowUnknownCerts = *allowUnknownCerts
+	config.RouteViaDNS = *routeViaDNS
 	config.AutoMapCN = *autoMapCN
-
-	// Configure header injection
-	config.WithHeaderInjection(*injectUpstream, *injectDownstream)
+	config.InjectHeadersUpstream = *injectUpstream
+	config.InjectHeadersDownstream = *injectDownstream
 
 	// Create and start proxy
 	p, err := proxy.NewProxy(config)

@@ -147,7 +147,7 @@ func TestGeneratedStoreExpiry(t *testing.T) {
 
 	// Verify expiry matches default duration
 	expectedExpiry := time.Now().Add(storeOpts.DefaultTTL)
-	if diff := expectedExpiry.Sub(expiry); diff > time.Hour || diff < -time.Hour {
+	if diff := expectedExpiry.Sub(expiry); diff > 2*time.Hour || diff < -2*time.Hour {
 		t.Errorf("Certificate expiry differs from expected by %v", diff)
 	}
 }
