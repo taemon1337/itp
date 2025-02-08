@@ -4,13 +4,12 @@ FROM golang:1.23-alpine AS builder
 
 # Build arguments
 ARG VERSION=dev
-ARG BUILD_DATE
 ARG COMMIT_SHA
 
-WORKDIR /app
-
-# Install build dependencies
+# Install build dependencies early for better caching
 RUN apk add --no-cache gcc musl-dev
+
+WORKDIR /app
 
 # Copy go mod files first for better layer caching
 COPY go.mod go.sum ./
@@ -27,7 +26,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags="-w -s \
     -X main.version=${VERSION} \
-    -X main.buildDate=${BUILD_DATE} \
     -X main.commitSha=${COMMIT_SHA}" \
     -o /app/itp
 
@@ -36,9 +34,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
-# Copy the binary and certs from builder
+# Copy the binary from builder
 COPY --from=builder --chown=nonroot:nonroot /app/itp .
-COPY --from=builder --chown=nonroot:nonroot /app/*.crt /app/*.key ./
 
 # Expose the default port
 EXPOSE 8443

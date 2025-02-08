@@ -131,7 +131,7 @@ func TestNewProxy(t *testing.T) {
 		},
 	}
 
-	p, err := NewProxy(config)
+	p, err := NewProxy(config, logger.LevelDebug)
 	require.NoError(t, err)
 
 	assert.NotNil(t, p)
@@ -183,7 +183,7 @@ func TestHandleConnection(t *testing.T) {
 	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := NewProxy(config)
+	p, err := NewProxy(config, logger.LevelDebug)
 	require.NoError(t, err)
 
 	// Add static route for echo server
@@ -239,7 +239,7 @@ func TestHeaderInjection(t *testing.T) {
 	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := NewProxy(config)
+	p, err := NewProxy(config, logger.LevelDebug)
 	require.NoError(t, err)
 
 	// Add static route for echo server
@@ -312,7 +312,7 @@ func TestGroupHeaderInjection(t *testing.T) {
 	config.WithEchoServer(testEchoServerName)
 
 	// Initialize proxy
-	p, err := NewProxy(config)
+	p, err := NewProxy(config, logger.LevelDebug)
 	require.NoError(t, err)
 
 	// Add static route for echo server

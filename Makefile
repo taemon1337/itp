@@ -2,7 +2,6 @@
 BINARY_NAME=itp
 DOCKER_IMAGE=taemon1337/itp
 VERSION?=1.0.0
-BUILD_DATE?=$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 COMMIT_SHA?=$(shell git rev-parse --short HEAD)
 GO_DOCKER_IMAGE=golang:1.23-alpine
 
@@ -65,7 +64,6 @@ build: ## Build binary
 	$(DOCKER_GO_RUN) go build \
 		-ldflags="-w -s \
 		-X main.version=${VERSION} \
-		-X main.buildDate=${BUILD_DATE} \
 		-X main.commitSha=${COMMIT_SHA}" \
 		-o $(BINARY_NAME)
 
@@ -73,7 +71,6 @@ build: ## Build binary
 docker-build: ## Build docker image
 	docker build \
 		--build-arg VERSION=$(VERSION) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		--build-arg COMMIT_SHA=$(COMMIT_SHA) \
 		-t $(DOCKER_IMAGE):$(VERSION) \
 		-t $(DOCKER_IMAGE):latest .
@@ -117,7 +114,27 @@ echo:
 		--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \
 		--inject-headers-upstream \
 		--add-role 'cn=curler=echo-user' \
-		--add-auth 'cn=*=read,write'
+		--add-auth 'cn=*=read,write' \
+		--debug-level debug
+
+.PHONY: echotcp
+echotcp:
+	docker run --rm \
+	-p 8443:8443 \
+	-v /etc/timezone:/etc/timezone:ro \
+	-v /etc/localtime:/etc/localtime:ro \
+	$(DOCKER_IMAGE):$(VERSION) \
+		--server-name proxy \
+		--internal-domain internal.com \
+		--external-domain external.com \
+		--echo-name echo \
+		--allow-unknown-certs \
+		--routes localhost=echo \
+		--auto-map-cn \
+		--external-domain external.com \
+		--add-role 'cn=curler=echo-user' \
+		--add-auth 'cn=*=read,write' \
+		--debug-level debug
 
 .PHONY: echobin
 echobin:
@@ -133,7 +150,8 @@ echobin:
 	--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \
 	--inject-headers-upstream \
 	--add-role 'cn=curler=echo-user' \
-	--add-auth 'cn=*=read,write'
+	--add-auth 'cn=*=read,write' \
+	--debug-level debug
 
 # Create Docker volumes for caching if they don't exist
 .PHONY: init

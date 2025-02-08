@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"bufio"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -13,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"bufio"
 	"github.com/itp/pkg/certstore"
 	"github.com/itp/pkg/echo"
 	"github.com/itp/pkg/identity"
@@ -165,16 +165,16 @@ func (c *Config) WithCertificates(certFile, keyFile, caFile string) *Config {
 	return c
 }
 
-// New creates a new proxy instance with the given configuration
-func NewProxy(config *Config) (*Proxy, error) {
+// New creates a new proxy instance with the given configuration and log level
+func NewProxy(config *Config, logLevel logger.LogLevel) (*Proxy, error) {
 	var err error
 	p := &Proxy{
 		config:            config,
 		allowUnknownCerts: config.AllowUnknownCerts,
-		proxyLogger:      logger.New("proxy", logger.LevelInfo),
-		routerLogger:     logger.New("router", logger.LevelInfo),
-		translatorLogger: logger.New("translator", logger.LevelInfo),
-		echoLogger:      logger.New("echo", logger.LevelInfo),
+		proxyLogger:      logger.New("proxy", logLevel),
+		routerLogger:     logger.New("router", logLevel),
+		translatorLogger: logger.New("translator", logLevel),
+		echoLogger:      logger.New("echo", logLevel),
 	}
 
 	// Create cert stores
@@ -247,17 +247,25 @@ func (p *Proxy) getDefaultSNI(conn net.Conn) string {
 	// Get the host part from the local address
 	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
 	if err != nil {
+		p.proxyLogger.Error("Failed to split host:port: %v", err)
 		return ""
 	}
 
-	// If it's localhost or 127.0.0.1, use "localhost"
-	if host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" || host == "::" {
+	// If it's empty host or localhost addresses, use "localhost"
+	if host == "" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" || host == "::" {
+		if host == "" {
+			p.proxyLogger.Debug("Empty host treating as localhost")
+		}
 		return "localhost"
+	}
+
+	if strings.HasPrefix(host, "172.") || strings.HasPrefix(host, "192.") {
+		return "localhost" // private ip addresses
 	}
 
 	// Check if it's an IP address
 	if net.ParseIP(host) != nil {
-		return ""
+		return "" // public ip address
 	}
 
 	// For hostnames, use the hostname
@@ -305,20 +313,34 @@ func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message str
 
 // HandleConnection manages a proxied connection with identity translation
 func (p *Proxy) HandleConnection(conn net.Conn) {
-	defer conn.Close()
+	// Since we use tls.Listen, conn is already a *tls.Conn
+	tlsConn := conn.(*tls.Conn)
+	defer tlsConn.Close()
 
 	ident := &identity.Identity{}
+	p.proxyLogger.Debug("Handling connection: %v", tlsConn.RemoteAddr())
 
-	// Since we use tls.Listen, conn is already a *tls.Conn
-	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		p.proxyLogger.Error("Connection is not a TLS connection")
-		p.handleErrorConnection(conn, http.StatusBadRequest, "internal server error")
+	// Set handshake timeout
+	if err := tlsConn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		p.proxyLogger.Error("Failed to set handshake deadline: %v", err)
+		return
+	}
+
+	// Complete TLS handshake
+	if err := tlsConn.Handshake(); err != nil {
+		p.proxyLogger.Error("TLS handshake failed: %v", err)
+		return
+	}
+
+	// Clear deadline after handshake
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		p.proxyLogger.Error("Failed to clear deadline: %v", err)
 		return
 	}
 
 	// Get connection state and verify client certificate if required
 	state := tlsConn.ConnectionState()
+	p.proxyLogger.Debug("TLS handshake completed with cipher suite: %s", tls.CipherSuiteName(state.CipherSuite))
 	if len(state.PeerCertificates) == 0 {
 		if !p.allowUnknownCerts {
 			p.proxyLogger.Error("No client certificate provided")
@@ -352,8 +374,13 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		}
 	}
 
-	// Get server name from TLS state
+	// Get server name from TLS state or use default
 	serverName := state.ServerName
+	if serverName == "" {
+		// Try to get a default SNI based on connection details
+		serverName = p.getDefaultSNI(conn)
+		p.proxyLogger.Debug("Using default SNI: %s", serverName)
+	}
 
 	// Resolve destination
 	destination, err := p.router.ResolveDestination(serverName)
@@ -370,69 +397,70 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 	}
 
 	// Handle as TCP connection
-	p.handleTCPConnection(conn, tlsConn, destination, ident)
+	p.handleTCPConnection(tlsConn, destination, ident)
 }
 
-// connResponseWriter adapts net.Conn to http.ResponseWriter
-type connResponseWriter struct {
-	conn    net.Conn
+// responseWriter implements http.ResponseWriter for a buffered writer
+type responseWriter struct {
+	writer  *bufio.Writer
 	header  http.Header
 	written bool
 }
 
-func newConnResponseWriter(conn net.Conn) *connResponseWriter {
-	return &connResponseWriter{
-		conn:   conn,
+func newResponseWriter(writer *bufio.Writer) *responseWriter {
+	return &responseWriter{
+		writer: writer,
 		header: make(http.Header),
 	}
 }
 
-func (w *connResponseWriter) Header() http.Header {
+func (w *responseWriter) Header() http.Header {
 	return w.header
 }
 
-func (w *connResponseWriter) Write(b []byte) (int, error) {
+func (w *responseWriter) Write(b []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
-	return w.conn.Write(b)
+	return w.writer.Write(b)
 }
 
-func (w *connResponseWriter) WriteHeader(statusCode int) {
+func (w *responseWriter) WriteHeader(statusCode int) {
 	if w.written {
 		return
 	}
 	w.written = true
 
 	// Write status line
-	statusText := http.StatusText(statusCode)
-	if statusText == "" {
-		statusText = "status code " + fmt.Sprint(statusCode)
-	}
-	fmt.Fprintf(w.conn, "HTTP/1.1 %d %s\r\n", statusCode, statusText)
+	fmt.Fprintf(w.writer, "HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
 
 	// Write headers
-	w.header.Write(w.conn)
+	for key, values := range w.header {
+		for _, value := range values {
+			fmt.Fprintf(w.writer, "%s: %s\r\n", key, value)
+		}
+	}
 
-	// Write the final CRLF
-	fmt.Fprintf(w.conn, "\r\n")
+	// End headers
+	fmt.Fprintf(w.writer, "\r\n")
 }
 
-func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverName string, identity *identity.Identity) {
-	// Note: conn is already a TLS connection established by setupTLSConnection
-	defer conn.Close()
+func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serverName string, identity *identity.Identity) {
+	defer tlsConn.Close()
 
-	p.proxyLogger.Debug("Starting HTTP connection handling for destination: %s, server: %s", destination, serverName)
+	p.proxyLogger.Debug("Starting HTTP connection handling for destination: %s, server: %s, identity: %s", destination, serverName, identity.CommonName)
 
 	upstreamClientCert, err := p.internalCertStore.GetCertificate(context.Background(), identity.CommonName)
 	if err != nil {
 		p.proxyLogger.Error("Failed to get certificate for %s: %v", destination, err)
+		p.handleErrorConnection(tlsConn, http.StatusInternalServerError, "Failed to get certificate")
 		return
 	}
 
 	// Configure TLS for the upstream connection
 	host, _, err := net.SplitHostPort(destination)
 	if err != nil {
+		p.proxyLogger.Debug("Failed to split host/port %s: %v, using full destination as host", destination, err)
 		host = destination
 	}
 	p.proxyLogger.Debug("Using host %s for TLS verification", host)
@@ -441,10 +469,17 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverNa
 	// Create the reverse proxy
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
+			// Save the original request URL for logging
+			originalURL := *req.URL
+
+			// Update the request URL
 			req.URL.Scheme = "https"
 			req.URL.Host = destination
+			
+			// Set the Host header to match the destination
+			req.Host = destination
 
-			p.proxyLogger.Debug("Modifying request for upstream: %s %s", req.Method, req.URL)
+			p.proxyLogger.Debug("Modifying request: %s %s -> %s", req.Method, originalURL.String(), req.URL.String())
 
 			if p.config.InjectHeadersUpstream {
 				headers, err := p.headerInjector.GetHeaders(serverName, identity)
@@ -491,55 +526,73 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, destination string, serverNa
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			p.proxyLogger.Error("Proxy error: %v", err)
-
-			// Try to send an error response if possible
-			if !w.(*connResponseWriter).written {
-				w.WriteHeader(http.StatusBadGateway)
-				w.Write([]byte(fmt.Sprintf("Proxy Error: %v", err)))
-			}
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte(fmt.Sprintf("Proxy Error: %v", err)))
 		},
 	}
 
-	// Create response writer that writes to our connection
-	writer := newConnResponseWriter(conn)
-	reader := bufio.NewReader(conn)
+	// Ensure TLS handshake is complete
+	if err := tlsConn.Handshake(); err != nil {
+		p.proxyLogger.Error("TLS handshake failed: %v", err)
+		return
+	}
+	p.proxyLogger.Debug("TLS handshake completed with cipher suite: %s", tls.CipherSuiteName(tlsConn.ConnectionState().CipherSuite))
 
-	// Read the request
-	req, err := http.ReadRequest(reader)
+	// Create a buffered reader for the connection
+	connReader := bufio.NewReader(tlsConn)
+
+	// Read the first request
+	req, err := http.ReadRequest(connReader)
 	if err != nil {
 		p.proxyLogger.Error("Failed to read request: %v", err)
 		return
 	}
 
-	// Set the Host header if not already set
-	if req.Host == "" {
-		req.Host = destination
-	}
+	// Create response writer
+	writer := bufio.NewWriter(tlsConn)
+	resp := newResponseWriter(writer)
 
 	// Serve the request
-	proxy.ServeHTTP(writer, req)
+	p.proxyLogger.Debug("Handling HTTP request from %v: %s %s", tlsConn.RemoteAddr(), req.Method, req.URL)
+	proxy.ServeHTTP(resp, req)
 
-	p.proxyLogger.Debug("Successfully completed proxy request")
+	// Flush the response
+	if err := writer.Flush(); err != nil {
+		p.proxyLogger.Error("Failed to flush response: %v", err)
+	}
 }
 
 // handleTCPConnection handles direct TCP proxying with TLS termination
-func (p *Proxy) handleTCPConnection(conn net.Conn, tlsConn *tls.Conn, destination string, ident *identity.Identity) {
+func (p *Proxy) handleTCPConnection(tlsConn *tls.Conn, destination string, ident *identity.Identity) {
+	p.proxyLogger.Debug("Handling TCP connection to %s for identity %s", destination, ident.CommonName)
+
+	
+
 	// Get certificate for upstream connection
 	var upstreamCert *tls.Certificate
 	var err error = nil
-	if ident.CommonName == tlsConn.ConnectionState().PeerCertificates[0].Subject.CommonName {
+
+	// Ensure we have peer certificates
+	peerCerts := tlsConn.ConnectionState().PeerCertificates
+	if len(peerCerts) == 0 {
+		p.proxyLogger.Error("No peer certificates found")
+		p.handleErrorConnection(tlsConn, http.StatusUnauthorized, "Client certificate required")
+		return
+	}
+
+	if ident.CommonName == peerCerts[0].Subject.CommonName {
 		// If we're using the auto-mapped identity, get cert by CN
 		cn := ident.CommonName
 		upstreamCert, err = p.internalCertStore.GetCertificate(context.Background(), cn)
 		if err != nil {
-			p.handleErrorConnection(conn, http.StatusInternalServerError, "Failed to get certificate")
+			p.handleErrorConnection(tlsConn, http.StatusInternalServerError, "Failed to get certificate")
 			return
 		}
 		p.proxyLogger.Debug("Using auto-mapped certificate with CN: %s", cn)
 	} else {
 		upstreamCert, err = p.internalCertStore.GetCertificate(context.Background(), destination)
 		if err != nil {
-			p.handleErrorConnection(conn, http.StatusInternalServerError, "Failed to get certificate")
+			p.handleErrorConnection(tlsConn, http.StatusInternalServerError, "Failed to get certificate")
 			return
 		}
 	}
@@ -553,29 +606,29 @@ func (p *Proxy) handleTCPConnection(conn net.Conn, tlsConn *tls.Conn, destinatio
 	// Create TLS config for upstream connection using cert store
 	upstreamConfig := p.createUpstreamTLSConfig(upstreamCert, p.translateServerName(host))
 
-	// If connecting to an echo server (a static route endpoint), use its name for TLS verification
-	if echoName, echoAddr := p.router.GetEchoUpstream(); echoName != "" && destination == echoAddr {
-		upstreamConfig.ServerName = echoName
-	}
-
 	// Connect to upstream
+	p.proxyLogger.Debug("Connecting to upstream %s with ServerName %s", destination, upstreamConfig.ServerName)
 	upstreamConn, err := tls.Dial("tcp", destination, upstreamConfig)
 	if err != nil {
-		p.handleErrorConnection(conn, http.StatusInternalServerError, "Failed to connect to upstream")
+		p.proxyLogger.Error("Failed to connect to upstream %s: %v", destination, err)
+		p.handleErrorConnection(tlsConn, http.StatusInternalServerError, "Failed to connect to upstream")
 		return
 	}
 	defer upstreamConn.Close()
+	p.proxyLogger.Debug("Successfully connected to upstream %s", destination)
 
 	// Create error channels for both directions
 	errChan := make(chan error, 2)
 
 	// Copy data bidirectionally
 	go func() {
-		_, err := io.Copy(upstreamConn, tlsConn)
+		n, err := io.Copy(upstreamConn, tlsConn)
+		p.proxyLogger.Debug("Client->Upstream copy finished after %d bytes: %v", n, err)
 		errChan <- err
 	}()
 	go func() {
-		_, err := io.Copy(tlsConn, upstreamConn)
+		n, err := io.Copy(tlsConn, upstreamConn)
+		p.proxyLogger.Debug("Upstream->Client copy finished after %d bytes: %v", n, err)
 		errChan <- err
 	}()
 
@@ -632,18 +685,21 @@ func (p *Proxy) setupEchoServer(config *Config) error {
 	if config.EchoDefaultCertOptions != nil {
 		echoCertOptions = config.EchoDefaultCertOptions
 	} else {
-		echoCertOptions = &certstore.CertificateOptions{
-			CommonName:  config.EchoName,
-			DNSNames: []string{
-				"localhost",
-				config.EchoName,
-				fmt.Sprintf("*.%s", config.InternalDomain),
-			},
-			KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-			TTL:         config.EchoStoreConfig.DefaultTTL, // Use TTL from config
-		}
+		echoCertOptions = &certstore.CertificateOptions{}
 	}
+
+	echoCertOptions.CommonName = config.EchoName
+	echoCertOptions.DNSNames = append(echoCertOptions.DNSNames,
+		config.EchoName,
+		fmt.Sprintf("*.%s", config.InternalDomain),
+		"localhost",
+	)
+	echoCertOptions.IPAddresses = append(echoCertOptions.IPAddresses,
+		net.ParseIP("127.0.0.1"),
+	)
+	echoCertOptions.TTL = config.EchoStoreConfig.DefaultTTL
+	echoCertOptions.KeyUsage = x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature
+	echoCertOptions.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 
 	// Get certificate from store using the provided echo name
 	echoServerCert, err := p.internalCertStore.GetCertificateWithOptions(context.Background(), config.EchoName, echoCertOptions)
@@ -651,19 +707,41 @@ func (p *Proxy) setupEchoServer(config *Config) error {
 		return fmt.Errorf("failed to get echo server certificate: %v", err)
 	}
 
+	// Create echo server
 	echoServer := echo.New(echoServerCert, p.internalCertStore.GetCertPool(), config.EchoName)
-	if err := echoServer.Start(config.EchoAddr); err != nil {
-		return fmt.Errorf("failed to start echo server: %v", err)
-	}
 
-	// Configure router to use echo server
-	p.router.SetEchoUpstream(config.EchoName, config.EchoAddr)
-	// Add static route from 'echo' to the full echo name for convenience
-	p.router.AddStaticRoute("echo", config.EchoName)
-	p.proxyLogger.Info("Echo upstream enabled as '%s' on %s with alias 'echo'", config.EchoName, config.EchoAddr)
+	// Start echo server in a goroutine
+	go func() {
+		if err := echoServer.Start(config.EchoAddr); err != nil {
+			p.echoLogger.Error("Failed to start echo server: %v", err)
+		}
+	}()
+
+	// Add static routes for echo server
+	localAddr := fmt.Sprintf("127.0.0.1%s", config.EchoAddr)
+	p.router.AddStaticRoute("echo", localAddr)
+	p.router.AddStaticRoute(config.EchoName, localAddr)
+	p.proxyLogger.Info("Echo server started on %s with name '%s' and alias 'echo'", config.EchoAddr, config.EchoName)
 
 	return nil
 }
+
+// getTLSVersion returns a string representation of the TLS version
+func getTLSVersion(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS 1.0"
+	case tls.VersionTLS11:
+		return "TLS 1.1"
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("Unknown (0x%04x)", version)
+	}
+}
+
 
 // createServerTLSConfig creates the TLS configuration for the proxy's server listener.
 // This includes setting up server certificates, client certificate verification,
@@ -739,11 +817,14 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 // createUpstreamTLSConfig creates a TLS configuration for upstream connections
 func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, serverName string) *tls.Config {
 	return &tls.Config{
-		ClientAuth:   tls.RequireAndVerifyClientCert, // Always verify upstream client certs
+		// Present our client cert to the upstream
 		Certificates: []tls.Certificate{*upstreamCert},
-		RootCAs:     p.internalCertStore.GetCertPool(), // Trust internal CA for upstream certs
-		ClientCAs:   p.internalCertStore.GetCertPool(), // Trust internal CA for client certs
-		ServerName:  serverName,
+		// Trust the internal CA for verifying upstream server certs
+		RootCAs: p.internalCertStore.GetCertPool(),
+		// Use the translated server name for cert verification
+		ServerName: serverName,
+		// Enable hostname verification
+		InsecureSkipVerify: false,
 	}
 }
 
@@ -754,9 +835,7 @@ func (p *Proxy) Translator() *identity.Translator {
 
 // AddStaticRoute adds a static route to the router
 func (p *Proxy) AddStaticRoute(src, dest string) {
-	if dest == p.config.EchoName {
-		dest = fmt.Sprintf("%s.%s", dest, p.config.InternalDomain)
-	}
+	p.proxyLogger.Debug("Adding static route for %s -> %s", src, dest)
 	p.router.AddStaticRoute(src, dest)
 }
 

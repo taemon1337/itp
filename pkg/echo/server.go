@@ -3,6 +3,7 @@ package echo
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -71,14 +72,15 @@ func (s *Server) Start(addr string) error {
 		Certificates: []tls.Certificate{*s.cert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    s.ca,
-		RootCAs:      s.ca,
+		// No need for RootCAs since we're the server
 	}
 
-	ln, err := net.Listen("tcp", addr)
+	// Create TLS listener directly
+	ln, err := tls.Listen("tcp", addr, config)
 	if err != nil {
-		return fmt.Errorf("failed to create listener: %w", err)
+		return fmt.Errorf("failed to create TLS listener: %w", err)
 	}
-	s.listener = tls.NewListener(ln, config)
+	s.listener = ln
 
 	go s.serve()
 	return nil
@@ -96,6 +98,12 @@ func (s *Server) serve() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
+			// Check if listener was closed
+			if errors.Is(err, net.ErrClosed) {
+				log.Printf("listener closed")
+				return
+			}
+			// Handle temporary errors
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				log.Printf("temporary accept error: %v", err)
 				continue
@@ -134,15 +142,21 @@ func getCipherSuiteName(id uint16) string {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		log.Printf("connection is not TLS")
+	// Since we're using tls.Listen, all connections should be TLS
+	tlsConn := conn.(*tls.Conn)
+
+	// Perform handshake with timeout
+	if err := tlsConn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		log.Printf("failed to set handshake deadline: %v", err)
 		return
 	}
-
-	// Perform handshake
 	if err := tlsConn.Handshake(); err != nil {
 		log.Printf("TLS handshake failed: %v", err)
+		return
+	}
+	// Clear deadline after handshake
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		log.Printf("failed to clear deadline: %v", err)
 		return
 	}
 

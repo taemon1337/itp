@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/itp/pkg/proxy"
+	"github.com/itp/pkg/logger"
 )
 
 func main() {
@@ -32,6 +33,9 @@ func main() {
 	routeViaDNS := flag.Bool("route-via-dns", false, "Enable DNS-based routing")
 	autoMapCN := flag.Bool("auto-map-cn", true, "Automatically map CommonName")
 
+	// Logging flags
+	debugLevel := flag.String("debug-level", "info", "Debug level (error, warn, info, debug)")
+
 	// Header injection flags
 	injectUpstream := flag.Bool("inject-headers-upstream", true, "Inject headers upstream")
 	injectDownstream := flag.Bool("inject-headers-downstream", false, "Inject headers downstream")
@@ -46,6 +50,13 @@ func main() {
 		fmt.Println("Error: server-name, external-domain, and internal-domain are required")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	// Parse debug level
+	level, err := logger.ParseLevel(*debugLevel)
+	if err != nil {
+		fmt.Printf("Warning: invalid debug level '%s', using 'info': %v\n", *debugLevel, err)
+		level = logger.LevelInfo
 	}
 
 	// Create base config
@@ -72,8 +83,8 @@ func main() {
 	config.InjectHeadersUpstream = *injectUpstream
 	config.InjectHeadersDownstream = *injectDownstream
 
-	// Create and start proxy
-	p, err := proxy.NewProxy(config)
+	// Create and start proxy with debug level
+	p, err := proxy.NewProxy(config, level)
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
