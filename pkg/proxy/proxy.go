@@ -301,72 +301,38 @@ func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message str
 	}
 }
 
-// setupTLSConnection performs the initial TLS handshake and identity translation
-func (p *Proxy) setupTLSConnection(conn net.Conn) (*tls.Conn, *identity.Identity, string, error) {
-	// Step 1: Validate TLS connection and perform handshake
-	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		return nil, nil, "", fmt.Errorf("connection must be TLS")
-	}
 
-	// Perform TLS handshake explicitly to ensure it's done before checking state
-	if err := tlsConn.Handshake(); err != nil {
-		p.proxyLogger.Error("TLS handshake failed (b): %v", err)
-		return nil, nil, "", fmt.Errorf("TLS handshake failed (b): %v", err)
-	}
-
-	// Get connection state and verify it
-	state := tlsConn.ConnectionState()
-	if !state.HandshakeComplete {
-		return nil, nil, "", fmt.Errorf("TLS handshake reported complete but state shows incomplete")
-	}
-
-	// If no SNI was provided, use a default based on the connection
-	if state.ServerName == "" {
-		state.ServerName = p.getDefaultSNI(conn)
-		p.proxyLogger.Debug("No SNI provided, using default: %s", state.ServerName)
-	}
-
-	// Step 2: Verify client certificate
-	var clientCert *x509.Certificate
-	if len(state.PeerCertificates) > 0 {
-		clientCert = state.PeerCertificates[0]
-		p.proxyLogger.Debug("Using verified client certificate from %s, subject: %s",
-			conn.RemoteAddr(), clientCert.Subject)
-	}
-
-	// Step 3: Translate identity
-	ident, err := p.translator.TranslateIdentity(clientCert)
-	if err != nil {
-		var msg string
-		if translationErr, ok := err.(*identity.TranslationError); ok {
-			switch translationErr.Code {
-			case identity.ErrNoIdentityMappings:
-				msg = fmt.Sprintf("Access denied: %s", translationErr.Message)
-			case identity.ErrUnrecognizedClient:
-				msg = fmt.Sprintf("Invalid certificate: %s", translationErr.Message)
-			default:
-				msg = fmt.Sprintf("Identity translation failed: %s", translationErr.Message)
-			}
-		} else {
-			msg = fmt.Sprintf("Identity translation failed: %v", err)
-		}
-		return nil, nil, "", fmt.Errorf(msg)
-	}
-
-	return tlsConn, ident, state.ServerName, nil
-}
 
 // HandleConnection manages a proxied connection with identity translation
 func (p *Proxy) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Setup TLS connection and translate identity
-	tlsConn, ident, serverName, err := p.setupTLSConnection(conn)
-	if err != nil {
-		p.handleErrorConnection(conn, http.StatusBadRequest, err.Error())
+	// Since we use tls.Listen, conn is already a *tls.Conn
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		p.proxyLogger.Error("Connection is not a TLS connection")
+		p.handleErrorConnection(conn, http.StatusBadRequest, "internal server error")
 		return
 	}
+
+	// Get connection state and verify client certificate
+	state := tlsConn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		p.proxyLogger.Error("No client certificate provided")
+		p.handleErrorConnection(conn, http.StatusBadRequest, "client certificate required")
+		return
+	}
+
+	// Translate identity from certificate
+	ident, err := p.translator.TranslateIdentity(state.PeerCertificates[0])
+	if err != nil {
+		p.proxyLogger.Error("Failed to translate identity: %v", err)
+		p.handleErrorConnection(conn, http.StatusBadRequest, "identity translation failed")
+		return
+	}
+
+	// Get server name from TLS state
+	serverName := state.ServerName
 
 	// Resolve destination
 	destination, err := p.router.ResolveDestination(serverName)
