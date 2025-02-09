@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"net/http/httptest"
+	"strings"
 	"crypto/x509"
 	"fmt"
 	"net"
@@ -569,6 +571,79 @@ func TestClientCertVerification(t *testing.T) {
 			<-done
 		})
 	}
+}
+
+func TestProxyWithPreserveTLS(t *testing.T) {
+	// Initialize test configuration
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	config.AllowUnknownCerts = true
+	config.WithEchoServer(testEchoServerName)
+
+	// Create proxy instance
+	p, err := NewProxy(config, logger.LevelDebug)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	// Add route with PreserveTLS flag
+	p.AddStaticRoute("external.example.com", "tls://api.external.com:8443")
+
+	// Get client certificate
+	clientCert, err := p.serverCertStore.GetCertificate(context.Background(), testClientServerName)
+	if err != nil {
+		t.Fatalf("Failed to get client certificate: %v", err)
+	}
+
+	// Create a test server that verifies the client's SNI
+	var receivedSNI string
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.TLS = &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			receivedSNI = hello.ServerName
+			return &tls.Config{
+				Certificates: []tls.Certificate{*clientCert},
+			}, nil
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	// Update the route to point to our test server
+	p.AddStaticRoute("external.example.com", "tls://"+strings.TrimPrefix(server.URL, "https://"))
+
+	// Create test client
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      p.serverCertStore.GetCertPool(),
+				Certificates: []tls.Certificate{*clientCert},
+				ServerName:   "external.example.com",
+				InsecureSkipVerify: true, // Skip verification since we're using a self-signed cert
+			},
+		},
+	}
+
+	// Start proxy server
+	go func() {
+		if err := p.ListenAndServe(config); err != nil {
+			t.Errorf("Proxy server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond) // Wait for server to start
+
+	// Send request to our test server through the proxy
+	resp, err := client.Get("https://external.example.com/test")
+	if err != nil {
+		t.Fatalf("Failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Verify response and SNI
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// The proxy should have used api.external.com as the SNI when connecting to our test server
+	assert.Equal(t, "api.external.com", receivedSNI, "Wrong SNI used for upstream connection")
 }
 
 func TestTemplates(t *testing.T) {

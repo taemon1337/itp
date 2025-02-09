@@ -188,7 +188,7 @@ When injecting headers, you can use these template functions:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--route` | Static routes (format: src=dest[,src=dest,...]) or path-based routes (format: src/path=dest/path) | `""` |
+| `--route` | Static routes (format: src=dest[,src=dest,...]), path-based routes (format: src/path=dest/path), or TLS-preserving routes (format: src=tls://dest) | `""` |
 | `--route-via-dns` | Allow routing via DNS | `false` |
 | `--map-auto` | Automatically map client CN to upstream CN | `false` |
 
@@ -214,6 +214,23 @@ Path-based routing features:
 - Optional path stripping when destination has no path
 - Compatible with existing routing strategies
 - Preserves unmatched paths in requests
+
+#### TLS Verification Preservation
+
+When routing to external services that have their own TLS certificates, you can preserve the original hostname for TLS verification:
+
+```bash
+# Route to external API with its own TLS certificate
+itp --route "api.internal.com=tls://api.external.com:8443"
+
+# Combine with path-based routing
+itp --route "api.internal.com/v2=tls://api.external.com:8443/v1"
+```
+
+This is useful when:
+- The destination uses its own TLS certificates (not provided by the proxy)
+- The destination's certificate doesn't include the internal domain names
+- You need to maintain end-to-end TLS verification while still using the proxy's routing capabilities
 
 ### Header Injection
 

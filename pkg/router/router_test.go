@@ -380,6 +380,94 @@ func TestAddStaticRouteWithPaths(t *testing.T) {
 	}
 }
 
+func TestAddStaticRouteWithTLS(t *testing.T) {
+	tests := []struct {
+		name           string
+		source         string
+		destination    string
+		expectedRoute  *Route
+	}{
+		{
+			name:        "preserve TLS verification",
+			source:      "app.example.com",
+			destination: "tls://api.external.com:8443",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				Destination: "api.external.com:8443",
+				PreserveTLS: true,
+			},
+		},
+		{
+			name:        "preserve TLS with path",
+			source:      "app.example.com/api",
+			destination: "tls://api.external.com:8443/v1",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				SourcePath:  "/api",
+				Destination: "api.external.com:8443",
+				DestPath:    "/v1",
+				PreserveTLS: true,
+			},
+		},
+		{
+			name:        "normal route without TLS preservation",
+			source:      "app.example.com",
+			destination: "backend.cluster.local:8443",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				Destination: "backend.cluster.local:8443",
+				PreserveTLS: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRouter(setupTestLogger(), false)
+			r.AddStaticRoute(tt.source, tt.destination)
+
+			// Verify the route was stored correctly
+			route := r.routes[tt.expectedRoute.Source]
+			assert.NotNil(t, route)
+			assert.Equal(t, tt.expectedRoute.Source, route.Source)
+			assert.Equal(t, tt.expectedRoute.SourcePath, route.SourcePath)
+			assert.Equal(t, tt.expectedRoute.Destination, route.Destination)
+			assert.Equal(t, tt.expectedRoute.DestPath, route.DestPath)
+			assert.Equal(t, tt.expectedRoute.PreserveTLS, route.PreserveTLS)
+
+			// Verify the static route was also stored
+			dest := r.staticRoutes[tt.expectedRoute.Source]
+			assert.Equal(t, tt.expectedRoute.Destination, dest)
+		})
+	}
+}
+
+func TestPreserveTLSRoute(t *testing.T) {
+	r := NewRouter(setupTestLogger(), false)
+
+	// Add a route with PreserveTLS
+	r.AddStaticRoute("app.example.com", "tls://api.external.com:8443")
+
+	// Get the route configuration
+	route, ok := r.GetRoute("app.example.com")
+	assert.True(t, ok, "Route should exist")
+	assert.NotNil(t, route, "Route should not be nil")
+
+	// Verify PreserveTLS flag is set
+	assert.True(t, route.PreserveTLS, "PreserveTLS should be true")
+	assert.Equal(t, "api.external.com:8443", route.Destination, "Destination should be set correctly")
+
+	// Add a normal route without PreserveTLS
+	r.AddStaticRoute("app2.example.com", "backend.internal:8443")
+
+	// Verify PreserveTLS is not set
+	route, ok = r.GetRoute("app2.example.com")
+	assert.True(t, ok, "Route should exist")
+	assert.NotNil(t, route, "Route should not be nil")
+	assert.False(t, route.PreserveTLS, "PreserveTLS should be false")
+	assert.Equal(t, "backend.internal:8443", route.Destination, "Destination should be set correctly")
+}
+
 func TestAddStaticRoute(t *testing.T) {
 	tests := []struct {
 		name     string

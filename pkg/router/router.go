@@ -33,6 +33,12 @@ func (r *Router) SetEchoUpstream(name, addr string) {
 	r.logger.Info("Echo upstream configured with name=%s addr=%s", name, addr)
 }
 
+// GetRoute returns the route configuration for a given server name
+func (r *Router) GetRoute(serverName string) (*Route, bool) {
+	route, ok := r.routes[serverName]
+	return route, ok
+}
+
 // GetEchoUpstream returns the echo upstream name and address.
 // Returns the first echo endpoint added.
 func (r *Router) GetEchoUpstream() (string, string) {
@@ -140,16 +146,29 @@ func (r *Router) ResolveDestination(serverName string, path string) (string, str
 	return "", "", fmt.Errorf("no route found for %s", serverName)
 }
 
-// AddStaticRoute adds a static route mapping with optional path prefixes
+// AddStaticRoute adds a static route mapping with optional path prefixes and TLS preservation
 func (r *Router) AddStaticRoute(src, dest string) {
 	// Parse source and destination for paths
 	srcParts := strings.SplitN(src, "/", 2)
 	destParts := strings.SplitN(dest, "/", 2)
 
+	// Check if destination should preserve TLS verification
+	preserveTLS := false
+	destination := dest
+	if strings.HasPrefix(dest, "tls://") {
+		preserveTLS = true
+		destination = strings.TrimPrefix(dest, "tls://")
+	}
+
+	// Parse destination for paths after handling tls:// prefix
+	destParts = strings.SplitN(destination, "/", 2)
+	destination = destParts[0]
+
 	// Create the route with path information
 	route := &Route{
 		Source:      srcParts[0],
-		Destination: destParts[0],
+		Destination: destination,
+		PreserveTLS: preserveTLS,
 	}
 
 	// Add path prefixes if present

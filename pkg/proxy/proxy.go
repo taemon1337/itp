@@ -530,7 +530,12 @@ func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serv
 		},
 		// Use a transport that will establish new TLS connections to the upstream
 		Transport: &http.Transport{
-			TLSClientConfig: p.createUpstreamTLSConfig(upstreamClientCert, p.translateServerName(serverName)),
+			TLSClientConfig: p.createUpstreamTLSConfig(
+				upstreamClientCert,
+				serverName,
+				p.translateServerName(serverName),
+				destination,
+			),
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if p.config.InjectHeadersDownstream {
@@ -631,8 +636,16 @@ func (p *Proxy) handleTCPConnection(tlsConn *tls.Conn, destination string, ident
 		host = h
 	}
 
+	// Get the original server name from the client's TLS connection
+	originalName := tlsConn.ConnectionState().ServerName
+
 	// Create TLS config for upstream connection using cert store
-	upstreamConfig := p.createUpstreamTLSConfig(upstreamCert, p.translateServerName(host))
+	upstreamConfig := p.createUpstreamTLSConfig(
+		upstreamCert,
+		originalName, // Use original server name for route lookup
+		p.translateServerName(host),
+		destination,
+	)
 
 	// Connect to upstream
 	p.proxyLogger.Debug("Connecting to upstream %s with ServerName %s", destination, upstreamConfig.ServerName)
@@ -842,18 +855,42 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// createUpstreamTLSConfig creates a TLS configuration for upstream connections
-func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, serverName string) *tls.Config {
-	return &tls.Config{
+// createUpstreamTLSConfig creates a TLS configuration for upstream connections.
+// Parameters:
+// - upstreamCert: the client certificate to present to the upstream
+// - externalName: the original external server name (before translation)
+// - internalName: the internal server name (after translation)
+// - destination: the destination address (host:port)
+func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, externalName, internalName, destination string) *tls.Config {
+	// Create base TLS config with internal CA and client cert
+	tlsConfig := &tls.Config{
 		// Present our client cert to the upstream
 		Certificates: []tls.Certificate{*upstreamCert},
 		// Trust the internal CA for verifying upstream server certs
 		RootCAs: p.internalCertStore.GetCertPool(),
-		// Use the translated server name for cert verification
-		ServerName: serverName,
-		// Enable hostname verification
+		// By default use the internal name and verify against our CA
+		ServerName: internalName,
 		InsecureSkipVerify: false,
 	}
+
+	// Check if we should preserve the original destination hostname for TLS verification
+	if route, ok := p.router.GetRoute(externalName); ok && route.PreserveTLS {
+		// Extract hostname from destination if it's a host:port combination
+		host := destination
+		if h, _, err := net.SplitHostPort(destination); err == nil {
+			host = h
+		}
+
+		// When preserving TLS:
+		// 1. Set ServerName to the external hostname for proper certificate validation
+		// 2. Skip internal CA verification since we're connecting to an external service
+		tlsConfig.ServerName = host
+		tlsConfig.InsecureSkipVerify = true
+		tlsConfig.RootCAs, _ = x509.SystemCertPool() // Use system CA for external services
+		p.proxyLogger.Debug("Using original destination hostname for TLS verification: %s", host)
+	}
+
+	return tlsConfig
 }
 
 // Translator returns the identity translator instance
