@@ -398,8 +398,8 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		p.proxyLogger.Debug("Using default SNI: %s", serverName)
 	}
 
-	// Resolve destination
-	destination, err := p.router.ResolveDestination(serverName)
+	// Resolve destination (ignoring returned newPath since routing via TCP)
+	destination, _, err := p.router.ResolveDestination(serverName, "")
 	if err != nil {
 		p.handleErrorConnection(conn, http.StatusNotFound, err.Error())
 		return
@@ -486,6 +486,18 @@ func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serv
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			// Save the original request URL for logging
+			originalPath := req.URL.Path
+
+			// Resolve destination with path routing
+			finalDest, newPath, err := p.router.ResolveDestination(serverName, req.URL.Path)
+			if err != nil {
+				p.proxyLogger.Error("Failed to resolve destination with path: %v", err)
+				return
+			}
+			destination = finalDest
+			req.URL.Path = newPath
+
+			p.proxyLogger.Debug("Path routing: %s -> %s", originalPath, req.URL.Path)
 			originalURL := *req.URL
 
 			// Update the request URL

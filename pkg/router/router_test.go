@@ -101,6 +101,142 @@ func TestSetEchoUpstream(t *testing.T) {
 	}
 }
 
+func TestResolveDestinationWithPorts(t *testing.T) {
+	tests := []struct {
+		name           string
+		routes         map[string]string
+		serverName     string
+		path           string
+		expectedDest   string
+		expectedPath   string
+		expectedError  string
+	}{
+		{
+			name: "destination with port",
+			routes: map[string]string{
+				"app.example.com": "backend.cluster.local:8080",
+			},
+			serverName:    "app.example.com",
+			path:          "/users",
+			expectedDest:  "backend.cluster.local:8080",
+			expectedPath:  "/users",
+		},
+		{
+			name: "path routing with port",
+			routes: map[string]string{
+				"app.example.com/api": "backend.cluster.local:8080/v1",
+			},
+			serverName:    "app.example.com",
+			path:          "/api/users",
+			expectedDest:  "backend.cluster.local:8080",
+			expectedPath:  "/v1/users",
+		},
+		{
+			name: "chained routes with port",
+			routes: map[string]string{
+				"app.example.com": "backend.cluster.local:8080",
+				"backend.cluster.local:8080": "final.cluster.local:9090",
+			},
+			serverName:    "app.example.com",
+			path:          "/users",
+			expectedDest:  "final.cluster.local:9090",
+			expectedPath:  "/users",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRouter(setupTestLogger(), false)
+			for src, dest := range tt.routes {
+				r.AddStaticRoute(src, dest)
+			}
+
+			dest, path, err := r.ResolveDestination(tt.serverName, tt.path)
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedDest, dest)
+				assert.Equal(t, tt.expectedPath, path)
+			}
+		})
+	}
+}
+
+func TestResolveDestinationWithPaths(t *testing.T) {
+	tests := []struct {
+		name           string
+		routes         map[string]string
+		serverName     string
+		path           string
+		expectedDest   string
+		expectedPath   string
+		expectedError  string
+	}{
+		{
+			name: "path prefix replacement",
+			routes: map[string]string{
+				"echo.example.com/app": "upstream.cluster.local/api",
+			},
+			serverName:    "echo.example.com",
+			path:          "/app/v1/users",
+			expectedDest:  "upstream.cluster.local",
+			expectedPath:  "/api/v1/users",
+		},
+		{
+			name: "path prefix stripping",
+			routes: map[string]string{
+				"echo.example.com/app": "upstream.cluster.local",
+			},
+			serverName:    "echo.example.com",
+			path:          "/app/v1/users",
+			expectedDest:  "upstream.cluster.local",
+			expectedPath:  "/v1/users",
+		},
+		{
+			name: "no path in route",
+			routes: map[string]string{
+				"echo.example.com": "upstream.cluster.local",
+			},
+			serverName:    "echo.example.com",
+			path:          "/v1/users",
+			expectedDest:  "upstream.cluster.local",
+			expectedPath:  "/v1/users",
+		},
+		{
+			name: "path does not match prefix",
+			routes: map[string]string{
+				"echo.example.com/app": "upstream.cluster.local/api",
+			},
+			serverName:    "echo.example.com",
+			path:          "/v1/users",
+			expectedDest:  "echo.example.com",
+			expectedPath:  "/v1/users",
+			expectedError: "no route found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRouter(setupTestLogger(), false)
+			for src, dest := range tt.routes {
+				r.AddStaticRoute(src, dest)
+			}
+
+			dest, path, err := r.ResolveDestination(tt.serverName, tt.path)
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedDest, dest)
+				assert.Equal(t, tt.expectedPath, path)
+			}
+		})
+	}
+}
+
 func TestResolveDestination(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -170,7 +306,7 @@ func TestResolveDestination(t *testing.T) {
 				r.AddStaticRoute(src, dest)
 			}
 
-			dest, err := r.ResolveDestination(tt.serverName)
+			dest, _, err := r.ResolveDestination(tt.serverName, "")
 			if tt.expectedError != "" {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectedError)
@@ -178,6 +314,68 @@ func TestResolveDestination(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expectedDest, dest)
 			}
+		})
+	}
+}
+
+func TestAddStaticRouteWithPaths(t *testing.T) {
+	tests := []struct {
+		name           string
+		source         string
+		destination    string
+		expectedRoute  *Route
+	}{
+		{
+			name:        "with path prefixes",
+			source:      "echo.example.com/app",
+			destination: "upstream.cluster.local/api",
+			expectedRoute: &Route{
+				Source:      "echo.example.com",
+				SourcePath:  "/app",
+				Destination: "upstream.cluster.local",
+				DestPath:    "/api",
+			},
+		},
+		{
+			name:        "with source path only",
+			source:      "echo.example.com/app",
+			destination: "upstream.cluster.local",
+			expectedRoute: &Route{
+				Source:      "echo.example.com",
+				SourcePath:  "/app",
+				Destination: "upstream.cluster.local",
+				DestPath:    "",
+			},
+		},
+		{
+			name:        "no paths",
+			source:      "echo.example.com",
+			destination: "upstream.cluster.local",
+			expectedRoute: &Route{
+				Source:      "echo.example.com",
+				SourcePath:  "",
+				Destination: "upstream.cluster.local",
+				DestPath:    "",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRouter(setupTestLogger(), false)
+			r.AddStaticRoute(tt.source, tt.destination)
+
+			// Verify the route was stored correctly
+			route := r.routes[tt.expectedRoute.Source]
+			assert.NotNil(t, route)
+			assert.Equal(t, tt.expectedRoute.Source, route.Source)
+			assert.Equal(t, tt.expectedRoute.SourcePath, route.SourcePath)
+			assert.Equal(t, tt.expectedRoute.Destination, route.Destination)
+			assert.Equal(t, tt.expectedRoute.DestPath, route.DestPath)
+
+			// Verify the static route was also stored
+			dest := r.staticRoutes[tt.expectedRoute.Source]
+			assert.Equal(t, tt.expectedRoute.Destination, dest)
 		})
 	}
 }

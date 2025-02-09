@@ -10,7 +10,7 @@ ITP is a high-performance mTLS proxy that translates identities between differen
 
 - **mTLS Support**: Full mutual TLS authentication for both client and server connections
 - **Identity Translation**: Map certificates between different security domains based on various certificate fields
-- **Flexible Routing**: Multiple routing strategies including DNS-based, static, and pattern-based routing
+- **Flexible Routing**: Multiple routing strategies including DNS-based, static, path-based, and pattern-based routing
 - **Dynamic Certificates**: Automatic certificate selection based on client certificate attributes
 - **Real-time Echo Server**: Built-in echo server for debugging TLS connections
 - **High Performance**: Written in Go for optimal performance and minimal resource usage
@@ -188,9 +188,32 @@ When injecting headers, you can use these template functions:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--route` | Static routes (format: src=dest[,src=dest,...]) | `""` |
+| `--route` | Static routes (format: src=dest[,src=dest,...]) or path-based routes (format: src/path=dest/path) | `""` |
 | `--route-via-dns` | Allow routing via DNS | `false` |
 | `--map-auto` | Automatically map client CN to upstream CN | `false` |
+
+#### Path-Based Routing
+
+ITP supports path-based routing with prefix matching and path stripping:
+
+```bash
+# Route with path prefix replacement
+itp --route "app.example.com/api=backend.cluster.local/v1"
+# /api/users -> /v1/users
+
+# Route with path stripping
+itp --route "app.example.com/api=backend.cluster.local"
+# /api/users -> /users
+
+# Multiple path-based routes
+itp --route "app.example.com/api=backend.cluster.local/v1,app.example.com/web=frontend.cluster.local"
+```
+
+Path-based routing features:
+- Prefix matching for flexible path routing
+- Optional path stripping when destination has no path
+- Compatible with existing routing strategies
+- Preserves unmatched paths in requests
 
 ### Header Injection
 

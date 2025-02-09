@@ -1,7 +1,7 @@
 # Build variables
 BINARY_NAME=itp
 DOCKER_IMAGE=taemon1337/itp
-VERSION?=1.0.1
+VERSION?=1.0.2
 COMMIT_SHA?=$(shell git rev-parse --short HEAD)
 GO_DOCKER_IMAGE=golang:1.23-alpine
 
