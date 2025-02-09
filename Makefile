@@ -1,7 +1,7 @@
 # Build variables
 BINARY_NAME=itp
 DOCKER_IMAGE=taemon1337/itp
-VERSION?=1.0.0
+VERSION?=1.0.1
 COMMIT_SHA?=$(shell git rev-parse --short HEAD)
 GO_DOCKER_IMAGE=golang:1.23-alpine
 
@@ -108,7 +108,7 @@ echo:
 		--external-domain external.com \
 		--echo-name echo \
 		--allow-unknown-certs \
-		--routes localhost=echo \
+		--route localhost=echo \
 		--auto-map-cn \
 		--external-domain external.com \
 		--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \
@@ -129,7 +129,7 @@ echotcp:
 		--external-domain external.com \
 		--echo-name echo \
 		--allow-unknown-certs \
-		--routes localhost=echo \
+		--route localhost=echo \
 		--auto-map-cn \
 		--external-domain external.com \
 		--add-role 'cn=curler=echo-user' \
@@ -144,7 +144,7 @@ echobin:
 	--external-domain external.com \
 	--echo-name echo \
 	--allow-unknown-certs \
-	--routes localhost=echo \
+	--route localhost=echo \
 	--auto-map-cn \
 	--external-domain external.com \
 	--inject-header 'localhost=X-User=USER:{{.CommonName}};{{if .Roles}}{{range .Roles}}ROLE:{{.}}{{end}};{{if .Auths}}{{range .Auths}}AUTH:{{.}};{{end}}{{end}}{{end}}' \

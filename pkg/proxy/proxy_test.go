@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestGetDefaultSNI(t *testing.T) {
 		{
 			name:     "IPv4 address",
 			addr:     "192.168.1.1:443",
-			expected: "",
+			expected: "localhost", // any 172|192 address is considered localhost
 		},
 		{
 			name:     "IPv6 address",
@@ -385,7 +386,7 @@ func TestAddHeader(t *testing.T) {
 		routerLogger:     logger.New("router", logger.LevelInfo),
 		translatorLogger: logger.New("translator", logger.LevelInfo),
 		echoLogger:      logger.New("echo", logger.LevelInfo),
-		headerInjector:   NewHeaderInjector(),
+		headerInjector:   NewHeaderInjector(logger.New("header", logger.LevelInfo)),
 	}
 
 	// Test adding a header template
@@ -570,6 +571,67 @@ func TestClientCertVerification(t *testing.T) {
 	}
 }
 
+func TestTemplates(t *testing.T) {
+	// Create proxy
+	config := NewProxyConfig(testProxyServerName, testExternalDomain, testInternalDomain)
+	p, err := NewProxy(config, logger.LevelInfo)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+
+	// Test adding template string
+	err = p.AddTemplate("user-info", "User:{{.CommonName}};Roles:{{join .Roles \"; \"}}")
+	if err != nil {
+		t.Errorf("Failed to add template: %v", err)
+	}
+
+	// Test using template in header
+	err = p.AddHeader("echo.example.com", "X-User-Info", "{{template \"user-info\"}}")
+	if err != nil {
+		t.Errorf("Failed to add header with template: %v", err)
+	}
+
+	// Test adding template from file
+	tmpfile, err := os.CreateTemp("", "template-*.tmpl")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	// Write template content
+	content := "Groups:{{join .Groups \"; \"}}"
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write template: %v", err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatalf("Failed to close template file: %v", err)
+	}
+
+	// Add template from file
+	err = p.AddTemplateFile("groups-info", tmpfile.Name())
+	if err != nil {
+		t.Errorf("Failed to add template from file: %v", err)
+	}
+
+	// Test using file template in header
+	err = p.AddHeader("echo.example.com", "X-Groups-Info", "{{template \"groups-info\"}}")
+	if err != nil {
+		t.Errorf("Failed to add header with file template: %v", err)
+	}
+
+	// Test invalid template
+	err = p.AddTemplate("invalid", "{{.Invalid}}")
+	if err == nil {
+		t.Error("Expected error for invalid template")
+	}
+
+	// Test non-existent template file
+	err = p.AddTemplateFile("nonexistent", "nonexistent.tmpl")
+	if err == nil {
+		t.Error("Expected error for non-existent template file")
+	}
+}
+
 func TestAddCommonHeader(t *testing.T) {
 	p := &Proxy{
 		config: &Config{
@@ -580,7 +642,7 @@ func TestAddCommonHeader(t *testing.T) {
 		routerLogger:     logger.New("router", logger.LevelInfo),
 		translatorLogger: logger.New("translator", logger.LevelInfo),
 		echoLogger:      logger.New("echo", logger.LevelInfo),
-		headerInjector:   NewHeaderInjector(),
+		headerInjector:   NewHeaderInjector(logger.New("header", logger.LevelInfo)),
 		translator:       identity.NewTranslator(logger.New("translator", logger.LevelInfo), true),
 	}
 

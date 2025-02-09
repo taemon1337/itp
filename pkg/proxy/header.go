@@ -3,108 +3,76 @@ package proxy
 import (
 	"bytes"
 	"fmt"
-	"log"
 	"strings"
 	"text/template"
 
 	"github.com/itp/pkg/identity"
+	"github.com/itp/pkg/logger"
 )
-
-// RoleConfig represents a custom role configuration
-type RoleConfig struct {
-	Name     string            // Name of the role (e.g., "admin", "developer")
-	Template string            // Template for the role value
-	Mappings map[string]string // Custom mappings for role values
-}
-
-// HeaderTemplate represents a template for injecting headers
-type HeaderTemplate struct {
-	Name     string
-	Template string
-	Type     string
-}
-
-// HeaderMapping maps an upstream to its header templates
-type HeaderMapping struct {
-	Upstream string
-	Headers  []HeaderTemplate
-}
 
 // HeaderInjector manages header injection for upstreams
 type HeaderInjector struct {
-	mappings   map[string][]HeaderTemplate
-	templates  map[string]map[string]*template.Template
-	roleConfig map[string]*RoleConfig // Maps role name to its configuration
-	logger     *log.Logger
+	headers   map[string]map[string]*template.Template
+	templates *TemplateManager
+	logger    *logger.Logger
 }
 
 // NewHeaderInjector creates a new header injector
-func NewHeaderInjector() *HeaderInjector {
+func NewHeaderInjector(logger *logger.Logger) *HeaderInjector {
 	return &HeaderInjector{
-		mappings:   make(map[string][]HeaderTemplate),
-		templates:  make(map[string]map[string]*template.Template),
-		roleConfig: make(map[string]*RoleConfig),
-		logger:     log.Default(),
+		headers:   make(map[string]map[string]*template.Template),
+		templates: NewTemplateManager(logger),
+		logger:    logger,
 	}
 }
 
-// AddCustomRole adds a custom role configuration
-func (h *HeaderInjector) AddCustomRole(name, templateStr string) error {
-	h.logger.Printf("Adding custom role %q with template %q", name, templateStr)
 
-	// Parse template to validate it
-	tmpl := template.New("role")
-	_, err := tmpl.Parse(templateStr)
-	if err != nil {
-		h.logger.Printf("Failed to parse role template: %v", err)
-		return fmt.Errorf("failed to parse role template: %v", err)
-	}
-
-	h.roleConfig[name] = &RoleConfig{
-		Name:     name,
-		Template: templateStr,
-		Mappings: make(map[string]string),
-	}
-	return nil
-}
-
-// AddRoleMapping adds a mapping for a custom role
-func (h *HeaderInjector) AddRoleMapping(roleName, key, value string) error {
-	role, ok := h.roleConfig[roleName]
-	if !ok {
-		return fmt.Errorf("unknown role name: %s", roleName)
-	}
-
-	h.logger.Printf("Adding role mapping %s=%s for role %q", key, value, roleName)
-	role.Mappings[key] = value
-	return nil
-}
 
 // AddHeader adds a header template for an upstream
 func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateStr string) error {
-    var err error = nil
-	h.logger.Printf("Adding header template for upstream %q: %s = %q", upstream, headerName, templateStr)
+    h.logger.Info("Adding header template for upstream %q: %s = %q", upstream, headerName, templateStr)
+    
+    // Ensure template references include context
+    templateStr = h.templates.WrapTemplateReference(templateStr)
 
-	// Create template with custom functions
-	tmpl := template.New("header").Funcs(template.FuncMap{
-		"join": strings.Join,
-		"comma": func(items []string) string { return strings.Join(items, ",") },
-		"space": func(items []string) string { return strings.Join(items, " ") },
-	})
+    // Check if the template string references a named template
+    if strings.HasPrefix(templateStr, "{{template \"") && strings.HasSuffix(templateStr, "\"}}") {
+        // Extract template name
+        name := strings.TrimPrefix(strings.TrimSuffix(templateStr, "\"}}"), "{{template \"")
+        
+        // Verify template exists
+        if _, err := h.templates.GetTemplate(name); err != nil {
+            return fmt.Errorf("referenced template %q not found: %v", name, err)
+        }
+    }
 
-	// Parse template
-	tmpl, err = tmpl.Parse(templateStr)
-	if err != nil {
-		h.logger.Printf("Failed to parse template: %v", err)
-		return fmt.Errorf("failed to parse template: %v", err)
-	}
+    // Create template with custom functions and template references
+    tmpl := template.New("header").Funcs(template.FuncMap{
+        "join":  strings.Join,
+        "comma": func(items []string) string { return strings.Join(items, ",") },
+        "space": func(items []string) string { return strings.Join(items, " ") },
+    })
 
-	// Validate template with test identity that has non-empty slices
-	testIdentity := &identity.Identity{
-		CommonName:       "test",
-		Organization:     []string{"test-org"},
-		OrganizationUnit: []string{"test-ou"},
-		Locality:         []string{"test-locality"},
+    // Add all named templates as sub-templates
+    for name, t := range h.templates.templates {
+        if _, err := tmpl.AddParseTree(name, t.Tree); err != nil {
+            return fmt.Errorf("failed to add template %q: %v", name, err)
+        }
+    }
+
+    // Parse the header template
+    tmpl, err := tmpl.Parse(templateStr)
+    if err != nil {
+        h.logger.Error("Failed to parse template: %v", err)
+        return fmt.Errorf("failed to parse template: %v", err)
+    }
+
+    // Validate template with test identity
+    testIdentity := &identity.Identity{
+        CommonName:       "test",
+        Organization:     []string{"test-org"},
+        OrganizationUnit: []string{"test-ou"},
+        Locality:         []string{"test-locality"},
 		Country:          []string{"test-country"},
 		State:            []string{"test-state"},
 		Groups:           []string{"test-group"},
@@ -113,78 +81,90 @@ func (h *HeaderInjector) AddHeader(upstream string, headerName string, templateS
 
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, testIdentity); err != nil {
-		h.logger.Printf("Invalid template: %v", err)
+		h.logger.Error("Invalid template: %v", err)
 		return fmt.Errorf("invalid template: %v", err)
 	}
 
 	// Initialize upstream templates map if needed
-	if _, ok := h.templates[upstream]; !ok {
-		h.templates[upstream] = make(map[string]*template.Template)
+	if _, ok := h.headers[upstream]; !ok {
+		h.headers[upstream] = make(map[string]*template.Template)
 	}
-	h.templates[upstream][headerName] = tmpl
-	h.logger.Printf("Successfully added header template for %q", headerName)
+	h.headers[upstream][headerName] = tmpl
+	h.logger.Info("Successfully added header template for %q", headerName)
 
 	return nil
 }
 
 // AddCommonHeader adds a common header (groups, roles, etc) for an upstream
 func (h *HeaderInjector) AddCommonHeader(headerType, upstream, headerName string) error {
-	h.logger.Printf("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
+	h.logger.Info("Adding common header of type %q for upstream %q: %s", headerType, upstream, headerName)
 
 	var templateStr string
 	switch headerType {
 	case "groups":
-		templateStr = "{{ range .Groups }}{{ . }}{{ end }}"
+		templateStr = "{{.Groups | join \"; \"}}"
 	case "roles":
-		// Check if this is a custom role
-		if role, ok := h.roleConfig[headerName]; ok {
-			templateStr = role.Template
-		} else {
-			templateStr = "{{ range .Roles }}{{ . }}{{ end }}"
-		}
+		templateStr = "{{.Roles | join \"; \"}}"
 	case "cn":
-		templateStr = "{{ .CommonName }}"
+		templateStr = "{{.CommonName}}"
 	case "org":
-		templateStr = "{{ range .Organization }}{{ . }}{{ end }}"
+		templateStr = "{{.Organization | join \"; \"}}"
 	case "ou":
-		templateStr = "{{ range .OrganizationUnit }}{{ . }}{{ end }}"
+		templateStr = "{{.OrganizationUnit | join \"; \"}}"
 	default:
-		h.logger.Printf("Unknown header type: %s", headerType)
+		h.logger.Error("Unknown header type: %s", headerType)
 		return fmt.Errorf("unknown header type: %s", headerType)
 	}
 
-	h.logger.Printf("Using template: %q", templateStr)
+	h.logger.Debug("Using template: %q", templateStr)
 	return h.AddHeader(upstream, headerName, templateStr)
 }
 
 func (h *HeaderInjector) HasHeaders(upstream string, identity *identity.Identity) bool {
-	_, ok := h.templates[upstream]
+	_, ok := h.headers[upstream]
 	return ok
+}
+
+// AddHeaderTemplate adds a header that uses a named template
+func (h *HeaderInjector) AddHeaderTemplate(upstream, headerName, templateName string) error {
+	h.logger.Info("Adding header template for upstream %q: %s = template %q", upstream, headerName, templateName)
+
+	// Verify template exists
+	if _, err := h.templates.GetTemplate(templateName); err != nil {
+		return fmt.Errorf("template %q not found: %v", templateName, err)
+	}
+
+	// Create the template reference
+	templateStr := fmt.Sprintf("{{template \"%s\"}}", templateName)
+	return h.AddHeader(upstream, headerName, templateStr)
 }
 
 // GetHeaders returns the headers that should be injected for an upstream
 func (h *HeaderInjector) GetHeaders(upstream string, identity *identity.Identity) (map[string]string, error) {
-	h.logger.Printf("Getting headers for upstream %q with identity %+v", upstream, identity)
+	h.logger.Debug("Getting headers for upstream %q with identity %+v", upstream, identity)
+	h.logger.Debug("Identity fields: CommonName=%q, Organization=%v, Groups=%v, Roles=%v", 
+		identity.CommonName, identity.Organization, identity.Groups, identity.Roles)
 
 	// Get templates for this upstream
-	templates, ok := h.templates[upstream]
+	templates, ok := h.headers[upstream]
 	if !ok {
-		h.logger.Printf("No header templates found for upstream %q", upstream)
+		h.logger.Debug("No header templates found for upstream %q", upstream)
 		return nil, nil
 	}
 
-	h.logger.Printf("Found %d header templates for upstream %q", len(templates), upstream)
+	h.logger.Debug("Found %d header templates for upstream %q", len(templates), upstream)
 
 	headers := make(map[string]string)
 	for header, tmpl := range templates {
-		h.logger.Printf("Executing template for header %q: %s", header, tmpl.Name())
+		h.logger.Debug("Executing template for header %q: %s", header, tmpl.Name())
+		h.logger.Debug("Template content: %s", tmpl.Tree.Root.String())
 		var buf bytes.Buffer
 		if err := tmpl.Execute(&buf, identity); err != nil {
-			h.logger.Printf("Failed to execute template for header %q: %v", header, err)
+			h.logger.Error("Failed to execute template for header %q: %v", header, err)
 			continue
 		}
 		value := buf.String()
-		h.logger.Printf("Setting header %q = %q", header, value)
+		h.logger.Debug("Setting header %q = %q", header, value)
 		headers[header] = value
 	}
 

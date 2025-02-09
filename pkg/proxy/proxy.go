@@ -194,7 +194,7 @@ func NewProxy(config *Config, logLevel logger.LogLevel) (*Proxy, error) {
 	p.translator = identity.NewTranslator(p.translatorLogger, config.AutoMapCN)
 
 	// Create header injector
-	p.headerInjector = NewHeaderInjector()
+	p.headerInjector = NewHeaderInjector(p.proxyLogger)
 
 	return p, nil
 }
@@ -223,9 +223,25 @@ func createCertStore(config *Config) (certstore.Store, error) {
 	return store, nil
 }
 
-// AddHeader adds a header template for an upstream
+// AddTemplate adds a named template that can be referenced in header templates
+func (p *Proxy) AddTemplate(name, template string) error {
+	return p.headerInjector.templates.AddTemplateString(name, template)
+}
+
+// AddTemplateFile adds a named template from a file
+func (p *Proxy) AddTemplateFile(name, filepath string) error {
+	return p.headerInjector.templates.AddTemplateFile(name, filepath)
+}
+
+// AddHeader adds a header template for an upstream. The template can reference
+// named templates using {{template "name"}}.
 func (p *Proxy) AddHeader(upstream, headerName, template string) error {
 	return p.headerInjector.AddHeader(upstream, headerName, template)
+}
+
+// AddHeaderTemplate adds a header that uses a named template
+func (p *Proxy) AddHeaderTemplate(upstream, headerName, templateName string) error {
+	return p.headerInjector.AddHeaderTemplate(upstream, headerName, templateName)
 }
 
 // AddCommonHeader adds a common header (groups, roles, etc) for an upstream
@@ -781,8 +797,8 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 	clientAuth := tls.RequireAndVerifyClientCert
 	var clientCAs *x509.CertPool
 	if p.allowUnknownCerts {
-		p.proxyLogger.Info("Client certificate verification disabled - accepting connections without certificates")
-		clientAuth = tls.RequestClientCert // Allow but don't require client certs
+		p.proxyLogger.Info("Client certificate verification disabled - requiring but not verifying certificates")
+		clientAuth = tls.RequireAnyClientCert // Require but don't verify client certs
 		clientCAs = nil // Don't verify against any CA pool
 	} else {
 		clientCAs = p.serverCertStore.GetCertPool() // Verify against server CA pool
