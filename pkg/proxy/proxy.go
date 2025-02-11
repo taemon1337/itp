@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -38,6 +39,7 @@ type Config struct {
 
 	// Certificate store configuration
 	CertStoreConfig *certstore.StoreOptions
+	K8sStoreConfig *certstore.K8sOptions // Used when UseK8sCertManager is true
 	InternalStoreConfig *certstore.StoreOptions
 	EchoStoreConfig *certstore.StoreOptions
 	
@@ -57,6 +59,9 @@ type Config struct {
 	// Header injection configuration
 	InjectHeadersUpstream   bool
 	InjectHeadersDownstream bool
+
+	// Certificate store type
+	UseK8sCertManager bool // Use Kubernetes cert-manager instead of generated certs
 }
 
 // Proxy represents a TLS proxy instance
@@ -72,6 +77,9 @@ type Proxy struct {
 	router         *router.Router
 	translator     *identity.Translator
 	headerInjector *HeaderInjector
+
+	// TLS Config
+	serverTLSConfig *tls.Config
 
 	// Loggers
 	proxyLogger     *logger.Logger
@@ -157,6 +165,18 @@ func (c *Config) WithEchoServer(name string) *Config {
 	return c
 }
 
+// WithK8sCertManager enables using Kubernetes cert-manager instead of generated certificates
+func (c *Config) WithK8sCertManager() *Config {
+	c.UseK8sCertManager = true
+	return c
+}
+
+// WithK8sConfig sets the Kubernetes certificate store configuration
+func (c *Config) WithK8sConfig(opts certstore.K8sOptions) *Config {
+	c.K8sStoreConfig = &opts
+	return c
+}
+
 // WithCertificates configures custom certificates
 func (c *Config) WithCertificates(certFile, keyFile, caFile string) *Config {
 	c.CertFile = certFile
@@ -178,14 +198,23 @@ func NewProxy(config *Config, logLevel logger.LogLevel) (*Proxy, error) {
 	}
 
 	// Create cert stores
-	p.serverCertStore, err = certstore.NewGeneratedStore(config.CertStoreConfig)
+	p.serverCertStore, err = createCertStore(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create server cert store: %v", err)
 	}
+
 	// Internal cert store for internal domain (clients and upstreams)
-	p.internalCertStore, err = certstore.NewGeneratedStore(config.InternalStoreConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create internal cert store: %v", err)
+	// Use same store type as server store
+	if config.UseK8sCertManager {
+		// Copy store options to k8s options
+		internalK8sConfig := *config.K8sStoreConfig
+		internalK8sConfig.StoreOptions = *config.InternalStoreConfig
+		p.internalCertStore = certstore.NewK8sStore(internalK8sConfig)
+	} else {
+		p.internalCertStore, err = certstore.NewGeneratedStore(config.InternalStoreConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create internal cert store: %v", err)
+		}
 	}
 	// Create router
 	p.router = router.NewRouter(p.routerLogger, config.RouteViaDNS)
@@ -206,6 +235,15 @@ func (p *Proxy) AutoMapEnabled() bool {
 
 // createCertStore creates a certificate store based on the configuration
 func createCertStore(config *Config) (certstore.Store, error) {
+	if config.UseK8sCertManager {
+		if config.K8sStoreConfig == nil {
+			return nil, fmt.Errorf("k8s cert store config is required when UseK8sCertManager is true")
+		}
+		// Copy store options to k8s options
+		config.K8sStoreConfig.StoreOptions = *config.CertStoreConfig
+		return certstore.NewK8sStore(*config.K8sStoreConfig), nil
+	}
+
 	store, err := certstore.NewGeneratedStore(config.CertStoreConfig)
 	if err != nil {
 		return nil, err
@@ -327,10 +365,25 @@ func (p *Proxy) handleErrorConnection(conn net.Conn, statusCode int, message str
 
 
 
+// handleHealthCheck responds to health check requests
+func (p *Proxy) handleHealthCheck(conn net.Conn) {
+	resp := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+	conn.Write([]byte(resp))
+}
+
 // HandleConnection manages a proxied connection with identity translation
 func (p *Proxy) HandleConnection(conn net.Conn) {
-	// Since we use tls.Listen, conn is already a *tls.Conn
-	tlsConn := conn.(*tls.Conn)
+	// Since we use tls.Listen, conn should be a *tls.Conn
+	tlsConn, ok := conn.(*tls.Conn)
+	if !ok {
+		// If it's not already a TLS connection, create a new TLS server connection
+		tlsConfig, err := p.createServerTLSConfig(p.config)
+		if err != nil {
+			p.proxyLogger.Error("Failed to create TLS config: %v", err)
+			return
+		}
+		tlsConn = tls.Server(conn, tlsConfig)
+	}
 	defer tlsConn.Close()
 
 	ident := &identity.Identity{}
@@ -398,22 +451,18 @@ func (p *Proxy) HandleConnection(conn net.Conn) {
 		p.proxyLogger.Debug("Using default SNI: %s", serverName)
 	}
 
-	// Resolve destination (ignoring returned newPath since routing via TCP)
-	destination, _, err := p.router.ResolveDestination(serverName, "")
-	if err != nil {
-		p.handleErrorConnection(conn, http.StatusNotFound, err.Error())
+	// For initial TCP connection, only check if we have any routes for this server
+	p.proxyLogger.Debug("Checking routes for server name: %s", serverName)
+	hasRoutes := p.router.HasRoutesForServer(serverName)
+	if !hasRoutes {
+		p.proxyLogger.Error("No routes found for server: %s", serverName)
+		p.handleErrorConnection(conn, http.StatusNotFound, fmt.Sprintf("no routes found for %s", serverName))
 		return
 	}
+	p.proxyLogger.Debug("Found routes for server: %s", serverName)
 
-	// Check if this is an HTTP connection that needs header injection
-	// note we handleHTTPConnection even if InjectHeadersUpstream|Downstream are false
-	if ok := p.headerInjector.HasHeaders(serverName, ident); ok {
-		p.handleHTTPConnection(tlsConn, destination, serverName, ident)
-		return
-	}
-
-	// Handle as TCP connection
-	p.handleTCPConnection(tlsConn, destination, ident)
+	// Always handle as HTTP
+	p.handleHTTPConnection(tlsConn, serverName, ident)
 }
 
 // responseWriter implements http.ResponseWriter for a buffered writer
@@ -461,34 +510,46 @@ func (w *responseWriter) WriteHeader(statusCode int) {
 	fmt.Fprintf(w.writer, "\r\n")
 }
 
-func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serverName string, identity *identity.Identity) {
+func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, serverName string, identity *identity.Identity) {
 	defer tlsConn.Close()
 
-	p.proxyLogger.Debug("Starting HTTP connection handling for destination: %s, server: %s, identity: %s", destination, serverName, identity.CommonName)
+	p.proxyLogger.Debug("Starting HTTP connection handling for server: %s, identity: %s", serverName, identity.CommonName)
 
 	upstreamClientCert, err := p.internalCertStore.GetCertificate(context.Background(), identity.CommonName)
 	if err != nil {
-		p.proxyLogger.Error("Failed to get certificate for %s: %v", destination, err)
+		p.proxyLogger.Error("Failed to get certificate: %v", err)
 		p.handleErrorConnection(tlsConn, http.StatusInternalServerError, "Failed to get certificate")
 		return
 	}
 
-	// Configure TLS for the upstream connection
-	host, _, err := net.SplitHostPort(destination)
-	if err != nil {
-		p.proxyLogger.Debug("Failed to split host/port %s: %v, using full destination as host", destination, err)
-		host = destination
-	}
-	p.proxyLogger.Debug("Using host %s for TLS verification", host)
-	p.proxyLogger.Debug("Using server name %s for TLS verification", serverName)
+	// We'll resolve the destination based on the path in the Director function
 
-	// Create the reverse proxy
+	// Create the reverse proxy with dynamic TLS config
+	var destination string
+	tlsConfig := p.createUpstreamTLSConfig(
+		upstreamClientCert,
+		serverName,
+		p.translateServerName(serverName),
+		"") // Initial destination is empty, will be set in Director
+
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			// Save the original request URL for logging
 			originalPath := req.URL.Path
 
+			// Initialize URL if needed
+			if req.URL == nil {
+				req.URL = &url.URL{}
+			}
+
+			// Set scheme and host before any URL operations
+			req.URL.Scheme = "https"
+			req.URL.Host = serverName
+			req.Host = serverName
+			req.Header.Set("Host", serverName)
+
 			// Resolve destination with path routing
+			p.proxyLogger.Debug("Resolving path %s for server %s", req.URL.Path, serverName)
 			finalDest, newPath, err := p.router.ResolveDestination(serverName, req.URL.Path)
 			if err != nil {
 				p.proxyLogger.Error("Failed to resolve destination with path: %v", err)
@@ -497,11 +558,13 @@ func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serv
 			destination = finalDest
 			req.URL.Path = newPath
 
-			p.proxyLogger.Debug("Path routing: %s -> %s", originalPath, req.URL.Path)
+			p.proxyLogger.Debug("Path routing: %s -> %s (Host: %s, Dest: %s)", originalPath, req.URL.Path, req.Host, destination)
 			originalURL := *req.URL
 
-			// Update the request URL
-			req.URL.Scheme = "https"
+			// Update TLS config with resolved destination
+			tlsConfig.ServerName = destination
+
+			// Update the request URL with final destination
 			req.URL.Host = destination
 			
 			// Set the Host header to match the destination
@@ -530,12 +593,7 @@ func (p *Proxy) handleHTTPConnection(tlsConn *tls.Conn, destination string, serv
 		},
 		// Use a transport that will establish new TLS connections to the upstream
 		Transport: &http.Transport{
-			TLSClientConfig: p.createUpstreamTLSConfig(
-				upstreamClientCert,
-				serverName,
-				p.translateServerName(serverName),
-				destination,
-			),
+			TLSClientConfig: tlsConfig,
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if p.config.InjectHeadersDownstream {
@@ -790,12 +848,6 @@ func getTLSVersion(version uint16) string {
 func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 	var serverCert *tls.Certificate
 
-	// Use auto-generated certificates for the server
-	genStore, ok := p.serverCertStore.(*certstore.GeneratedStore)
-	if !ok {
-		return nil, fmt.Errorf("server cert store is not a generated store")
-	}
-
 	// Configure server cert options
 	serverOpts := &certstore.CertificateOptions{
 		CommonName:  config.ServerName,
@@ -807,13 +859,13 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
 		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		TTL:         365 * 24 * time.Hour, // 1 year
+		TTL:         90 * 24 * time.Hour, // 90 days
 	}
 
 	// Get or generate server certificate
-	cert, err := genStore.GetCertificateWithOptions(context.Background(), config.ServerName, serverOpts)
+	cert, err := p.serverCertStore.GetCertificateWithOptions(context.Background(), config.ServerName, serverOpts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate server certificate: %v", err)
+		return nil, fmt.Errorf("failed to get server certificate: %v", err)
 	}
 	serverCert = cert
 
@@ -825,8 +877,20 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 		p.proxyLogger.Info("Client certificate verification disabled - requiring but not verifying certificates")
 		clientAuth = tls.RequireAnyClientCert // Require but don't verify client certs
 		clientCAs = nil // Don't verify against any CA pool
+	} else if config.CAFile != "" {
+		p.proxyLogger.Debug("Client certificate verification enabled - verifying client certificates against provided CA file")
+		// Use provided CA file for client cert verification
+		caCert, err := os.ReadFile(config.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file: %v", err)
+		}
+		clientCAs = x509.NewCertPool()
+		if !clientCAs.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA cert")
+		}
 	} else {
-		clientCAs = p.serverCertStore.GetCertPool() // Verify against server CA pool
+		// Use cert store's CA pool
+		clientCAs = p.serverCertStore.GetCertPool()
 	}
 
 	// Configure TLS
@@ -837,20 +901,7 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 		RootCAs:      p.internalCertStore.GetCertPool(), // CA pool for verifying upstream server certs
 	}
 
-	// Configure client certificate verification
-	if config.CAFile != "" {
-		p.proxyLogger.Debug("Client certificate verification enabled - verifying client certificates against provided CA file")
-		// Use provided CA file for client cert verification
-		caCert, err := os.ReadFile(config.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA file: %v", err)
-		}
-		caCertPool := x509.NewCertPool()
-		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return nil, fmt.Errorf("failed to parse CA cert")
-		}
-		tlsConfig.ClientCAs = caCertPool
-	}
+
 
 	return tlsConfig, nil
 }
@@ -862,26 +913,101 @@ func (p *Proxy) createServerTLSConfig(config *Config) (*tls.Config, error) {
 // - internalName: the internal server name (after translation)
 // - destination: the destination address (host:port)
 func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, externalName, internalName, destination string) *tls.Config {
+	// Get CA pool from internal cert store for verifying upstream certificates
+	caPool := p.internalCertStore.GetCertPool()
+	if caPool == nil {
+		p.proxyLogger.Error("No CA pool available from cert store - upstream certificate verification may fail")
+	} else {
+		p.proxyLogger.Debug("Using CA pool from cert store for upstream certificate verification")
+	}
+	p.proxyLogger.Debug("Creating upstream TLS config for external: %s, internal: %s, destination: %s", externalName, internalName, destination)
 	// Create base TLS config with internal CA and client cert
 	tlsConfig := &tls.Config{
+		// Use CA pool for verifying upstream certificates
+		RootCAs: caPool,
 		// Present our client cert to the upstream
 		Certificates: []tls.Certificate{*upstreamCert},
-		// Trust the internal CA for verifying upstream server certs
-		RootCAs: p.internalCertStore.GetCertPool(),
 		// By default use the internal name and verify against our CA
 		ServerName: internalName,
 		InsecureSkipVerify: false,
+		// Add verification callback to log certificate details
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			p.proxyLogger.Debug("Verifying peer certificate for %s", destination)
+			for i, rawCert := range rawCerts {
+				cert, err := x509.ParseCertificate(rawCert)
+				if err != nil {
+					p.proxyLogger.Error("Failed to parse peer certificate %d: %v", i, err)
+					continue
+				}
+				p.proxyLogger.Debug("Peer certificate %d: CN=%s, Issuer=%s", i, cert.Subject.CommonName, cert.Issuer.CommonName)
+			}
+			if len(verifiedChains) == 0 {
+				p.proxyLogger.Error("No verified certificate chains found")
+			} else {
+				for i, chain := range verifiedChains {
+					p.proxyLogger.Debug("Verified chain %d:", i)
+					for j, cert := range chain {
+						p.proxyLogger.Debug("  %d: CN=%s, Issuer=%s", j, cert.Subject.CommonName, cert.Issuer.CommonName)
+					}
+				}
+			}
+			return nil
+		},
 	}
 
-	// Check if we should preserve the original destination hostname for TLS verification
-	if route, ok := p.router.GetRoute(externalName); ok && route.PreserveTLS {
-		// Extract hostname from destination if it's a host:port combination
-		host := destination
-		if h, _, err := net.SplitHostPort(destination); err == nil {
-			host = h
-		}
+	// Extract hostname/IP from destination if it's a host:port combination
+	host := destination
+	if h, _, err := net.SplitHostPort(destination); err == nil {
+		host = h
+	}
 
-		// When preserving TLS:
+	// For connections to IP addresses, we need special handling
+	ip := net.ParseIP(host)
+	if ip != nil {
+		// When connecting to an IP, especially for the echo server:
+		// 1. Enable InsecureSkipVerify since the IP won't match the cert
+		// 2. But manually verify in VerifyPeerCertificate that the cert is valid for echo.cluster.local
+		tlsConfig.InsecureSkipVerify = true
+		originalVerify := tlsConfig.VerifyPeerCertificate
+		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			// First run the original verification if it exists
+			if originalVerify != nil {
+				if err := originalVerify(rawCerts, verifiedChains); err != nil {
+					return err
+				}
+			}
+
+			// Then verify the certificate is valid for echo.cluster.local
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificates presented")
+			}
+
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse certificate: %v", err)
+			}
+
+			// For echo server, verify it's valid for echo.cluster.local or *.cluster.local
+			if strings.HasPrefix(externalName, p.config.EchoName) {
+				for _, name := range cert.DNSNames {
+					if name == "echo.cluster.local" || name == "*.cluster.local" {
+						p.proxyLogger.Debug("Certificate is valid for %s", name)
+						return nil
+					}
+				}
+				return fmt.Errorf("certificate is not valid for echo.cluster.local or *.cluster.local")
+			}
+
+			// For other services, verify against the internal name
+			if err := cert.VerifyHostname(internalName); err != nil {
+				return fmt.Errorf("certificate is not valid for %s: %v", internalName, err)
+			}
+
+			return nil
+		}
+		p.proxyLogger.Debug("Using custom certificate verification for IP address %s", host)
+	} else if route, ok := p.router.GetRoute(externalName); ok && route.PreserveTLS {
+		// When preserving TLS for named hosts:
 		// 1. Set ServerName to the external hostname for proper certificate validation
 		// 2. Skip internal CA verification since we're connecting to an external service
 		tlsConfig.ServerName = host

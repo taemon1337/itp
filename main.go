@@ -7,7 +7,12 @@ import (
 	"os"
 	"strings"
 
+	cmclient "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"github.com/itp/pkg/proxy"
+	"github.com/itp/pkg/certstore"
 	"github.com/itp/pkg/logger"
 )
 
@@ -49,6 +54,11 @@ func main() {
 	certFile := flag.String("cert", "", "Path to certificate file")
 	keyFile := flag.String("key", "", "Path to private key file")
 	caFile := flag.String("ca", "", "Path to CA certificate file")
+	useK8sCertManager := flag.Bool("k8s-cert-manager", false, "Use Kubernetes cert-manager instead of generated certificates")
+	k8sNamespace := flag.String("k8s-namespace", "default", "Kubernetes namespace for cert-manager resources")
+	k8sIssuerName := flag.String("k8s-issuer-name", "default-issuer", "Name of the cert-manager issuer to use")
+	k8sIssuerKind := flag.String("k8s-issuer-kind", "ClusterIssuer", "Kind of the cert-manager issuer (ClusterIssuer or Issuer)")
+	k8sIssuerGroup := flag.String("k8s-issuer-group", "cert-manager.io", "API group of the issuer")
 
 	// Security flags
 	allowUnknownCerts := flag.Bool("allow-unknown-certs", false, "Allow unknown client certificates")
@@ -103,8 +113,32 @@ func main() {
 		config.WithEchoServer(*echoName)
 	}
 
-	// Configure certificates if provided
-	if *certFile != "" || *keyFile != "" || *caFile != "" {
+	// Configure certificates and cert store
+	if *useK8sCertManager {
+		config.WithK8sCertManager()
+		// Get k8s client and cert-manager client
+		k8sConfig, err := rest.InClusterConfig()
+		if err != nil {
+			log.Fatalf("Failed to get k8s config: %v", err)
+		}
+		k8sClient, err := kubernetes.NewForConfig(k8sConfig)
+		if err != nil {
+			log.Fatalf("Failed to create k8s client: %v", err)
+		}
+		cmClient, err := cmclient.NewForConfig(k8sConfig)
+		if err != nil {
+			log.Fatalf("Failed to create cert-manager client: %v", err)
+		}
+		// Set k8s config
+		config.WithK8sConfig(certstore.K8sOptions{
+			Namespace:   *k8sNamespace,
+			Client:      k8sClient,
+			CMClient:    cmClient,
+			IssuerName:  *k8sIssuerName,
+			IssuerKind:  *k8sIssuerKind,
+			IssuerGroup: *k8sIssuerGroup,
+		})
+	} else if *certFile != "" || *keyFile != "" || *caFile != "" {
 		config.WithCertificates(*certFile, *keyFile, *caFile)
 	}
 

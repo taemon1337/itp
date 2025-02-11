@@ -295,6 +295,31 @@ func TestResolveDestination(t *testing.T) {
 			useDNS:       true,
 			expectedDest: "127.0.0.1:443",
 		},
+		{
+			name:       "TLS route with path",
+			serverName: "secure.example.com",
+			staticRoutes: map[string]string{
+				"secure.example.com": "tls://api.external.com:8443/v1",
+			},
+			expectedDest: "api.external.com:8443",
+		},
+		{
+			name:       "TLS route without port",
+			serverName: "secure.example.com",
+			staticRoutes: map[string]string{
+				"secure.example.com": "tls://api.external.com",
+			},
+			expectedDest: "api.external.com",
+		},
+		{
+			name:       "chained TLS route",
+			serverName: "secure.example.com",
+			staticRoutes: map[string]string{
+				"secure.example.com": "tls://api.external.com:8443",
+				"api.external.com:8443": "final.external.com:9443",
+			},
+			expectedDest: "final.external.com:9443",
+		},
 	}
 
 	for _, tt := range tests {
@@ -366,8 +391,10 @@ func TestAddStaticRouteWithPaths(t *testing.T) {
 			r.AddStaticRoute(tt.source, tt.destination)
 
 			// Verify the route was stored correctly
-			route := r.routes[tt.expectedRoute.Source]
-			assert.NotNil(t, route)
+			routes := r.routes[tt.expectedRoute.Source]
+			assert.NotNil(t, routes)
+			assert.Equal(t, 1, len(routes), "Expected exactly one route")
+			route := routes[0]
 			assert.Equal(t, tt.expectedRoute.Source, route.Source)
 			assert.Equal(t, tt.expectedRoute.SourcePath, route.SourcePath)
 			assert.Equal(t, tt.expectedRoute.Destination, route.Destination)
@@ -419,6 +446,41 @@ func TestAddStaticRouteWithTLS(t *testing.T) {
 				PreserveTLS: false,
 			},
 		},
+		{
+			name:        "TLS with multiple path segments",
+			source:      "app.example.com/api/v2",
+			destination: "tls://api.external.com:8443/v1/public",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				SourcePath:  "/api/v2",
+				Destination: "api.external.com:8443",
+				DestPath:    "/v1/public",
+				PreserveTLS: true,
+			},
+		},
+		{
+			name:        "TLS with trailing slash in path",
+			source:      "app.example.com/api/",
+			destination: "tls://api.external.com:8443/v1/",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				SourcePath:  "/api/",
+				Destination: "api.external.com:8443",
+				DestPath:    "/v1/",
+				PreserveTLS: true,
+			},
+		},
+		{
+			name:        "TLS without port number",
+			source:      "app.example.com",
+			destination: "tls://api.external.com/v1",
+			expectedRoute: &Route{
+				Source:      "app.example.com",
+				Destination: "api.external.com",
+				DestPath:    "/v1",
+				PreserveTLS: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -427,8 +489,10 @@ func TestAddStaticRouteWithTLS(t *testing.T) {
 			r.AddStaticRoute(tt.source, tt.destination)
 
 			// Verify the route was stored correctly
-			route := r.routes[tt.expectedRoute.Source]
-			assert.NotNil(t, route)
+			routes := r.routes[tt.expectedRoute.Source]
+			assert.NotNil(t, routes)
+			assert.Equal(t, 1, len(routes), "Expected exactly one route")
+			route := routes[0]
 			assert.Equal(t, tt.expectedRoute.Source, route.Source)
 			assert.Equal(t, tt.expectedRoute.SourcePath, route.SourcePath)
 			assert.Equal(t, tt.expectedRoute.Destination, route.Destination)

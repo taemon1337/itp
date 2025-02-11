@@ -12,7 +12,7 @@ import (
 type Router struct {
 	useDNS       bool
 	staticRoutes map[string]string
-	routes       map[string]*Route // Stores full route information including paths
+	routes       map[string][]*Route // Stores full route information including paths
 	logger       *logger.Logger
 }
 
@@ -21,7 +21,7 @@ func NewRouter(logger *logger.Logger, useDNS bool) *Router {
 	return &Router{
 		useDNS:       useDNS,
 		staticRoutes: make(map[string]string),
-		routes:       make(map[string]*Route),
+		routes:       make(map[string][]*Route),
 		logger:       logger,
 	}
 }
@@ -33,10 +33,14 @@ func (r *Router) SetEchoUpstream(name, addr string) {
 	r.logger.Info("Echo upstream configured with name=%s addr=%s", name, addr)
 }
 
-// GetRoute returns the route configuration for a given server name
+// GetRoute returns the first route configuration for a given server name
 func (r *Router) GetRoute(serverName string) (*Route, bool) {
-	route, ok := r.routes[serverName]
-	return route, ok
+	routes, ok := r.routes[serverName]
+	if !ok || len(routes) == 0 {
+		return nil, false
+	}
+	// Return the first route for backward compatibility
+	return routes[0], true
 }
 
 // GetEchoUpstream returns the echo upstream name and address.
@@ -65,56 +69,105 @@ func (r *Router) GetEchoUpstream() (string, string) {
 }
 
 // ResolveDestination resolves the final destination for a server name and optional path
+// HasRoutesForServer checks if there are any routes defined for a server
+func (r *Router) HasRoutesForServer(serverName string) bool {
+	r.logger.Debug("Checking for routes for server: %s", serverName)
+	routes, hasRoutes := r.routes[serverName]
+	if !hasRoutes {
+		r.logger.Debug("No routes found for server %s", serverName)
+		return false
+	}
+	r.logger.Debug("Found %d routes for server %s", len(routes), serverName)
+	return true
+}
+
 func (r *Router) ResolveDestination(serverName string, path string) (string, string, error) {
-	r.logger.Debug("Resolving destination for server name: %s", serverName)
+	r.logger.Debug("Resolving destination for server name: %s with path: %s (len: %d)", serverName, path, len(path))
 
-	// Check static routes first
-	if route, hasRoute := r.routes[serverName]; hasRoute && route.SourcePath != "" && path != "" {
-		// If we have a path-based route, check if the path matches
-		if strings.HasPrefix(path, route.SourcePath) {
-			// Get the destination from static routes
-			dest, ok := r.staticRoutes[serverName]
-			if !ok {
-				return serverName, path, fmt.Errorf("no route found")
+	// Debug log all routes
+	r.logger.Debug("Current routes:")
+	for src, routes := range r.routes {
+		for _, route := range routes {
+			r.logger.Debug("  %s -> %s (SourcePath: %s, DestPath: %s)", src, route.Destination, route.SourcePath, route.DestPath)
+		}
+	}
+
+	// Check if we have routes for this server
+	routes, hasRoutes := r.routes[serverName]
+	if !hasRoutes {
+		r.logger.Debug("No routes found for server %s", serverName)
+		return "", "", fmt.Errorf("no route found for %s", serverName)
+	}
+
+	// If path is empty or just "/", try to find a default route first
+	if path == "" || path == "/" {
+		r.logger.Debug("Empty or root path, looking for default route")
+		for _, route := range routes {
+			if route.SourcePath == "" {
+				dest := route.Destination
+				// If dest is another static route, follow it
+				if finalDest, ok := r.staticRoutes[dest]; ok {
+					r.logger.Debug("Following static route %s -> %s -> %s", serverName, dest, finalDest)
+					dest = finalDest
+				}
+				r.logger.Debug("Using default route to destination %s", dest)
+				return dest, path, nil
 			}
+		}
+		// If no default route, try path-based routes
+		r.logger.Debug("No default route found, trying path-based routes")
+	}
 
+	// Try to match a path-based route
+	for _, route := range routes {
+		if route.SourcePath != "" {
+			r.logger.Debug("Checking if path %s matches route source path %s", path, route.SourcePath)
+			if strings.HasPrefix(path, route.SourcePath) {
+				dest := route.Destination
+				// If dest is another static route, follow it
+				if finalDest, ok := r.staticRoutes[dest]; ok {
+					r.logger.Debug("Following static route %s -> %s -> %s", serverName, dest, finalDest)
+					dest = finalDest
+				}
+
+				// Handle path transformation
+				if route.DestPath != "" {
+					// Replace source path prefix with destination path prefix
+					newPath := strings.Replace(path, route.SourcePath, route.DestPath, 1)
+					r.logger.Debug("Path transformed: %s -> %s", path, newPath)
+					return dest, newPath, nil
+				} else {
+					// Strip the source path prefix
+					newPath := strings.TrimPrefix(path, route.SourcePath)
+					if !strings.HasPrefix(newPath, "/") {
+						newPath = "/" + newPath
+					}
+					r.logger.Debug("Path stripped: %s -> %s", path, newPath)
+					return dest, newPath, nil
+				}
+			}
+			r.logger.Debug("Path %s does not match route source path %s", path, route.SourcePath)
+		}
+	}
+
+	// If no path-based route matched, try to find a route without a path
+	for _, route := range routes {
+		if route.SourcePath == "" {
+			dest := route.Destination
 			// If dest is another static route, follow it
 			if finalDest, ok := r.staticRoutes[dest]; ok {
 				r.logger.Debug("Following static route %s -> %s -> %s", serverName, dest, finalDest)
 				dest = finalDest
 			}
-
-			// Handle path transformation
-			if route.DestPath != "" {
-				// Replace source path prefix with destination path prefix
-				newPath := strings.Replace(path, route.SourcePath, route.DestPath, 1)
-				return dest, newPath, nil
-			} else {
-				// Strip the source path prefix
-				newPath := strings.TrimPrefix(path, route.SourcePath)
-				if !strings.HasPrefix(newPath, "/") {
-					newPath = "/" + newPath
-				}
-				return dest, newPath, nil
-			}
-		} else {
-			// Path doesn't match the route's source path
-			return serverName, path, fmt.Errorf("no route found")
+			r.logger.Debug("Using direct destination %s with path %s", dest, path)
+			return dest, path, nil
 		}
 	}
 
-	// No path-based route, check static routes
-	if dest, ok := r.staticRoutes[serverName]; ok {
-		// If dest is another static route, follow it
-		if finalDest, ok := r.staticRoutes[dest]; ok {
-			r.logger.Debug("Following static route %s -> %s -> %s", serverName, dest, finalDest)
-			return finalDest, path, nil
-		}
-		r.logger.Debug("Using static route %s -> %s", serverName, dest)
-		return dest, path, nil
-	}
+	r.logger.Debug("No matching route found for %s with path %s", serverName, path)
+	return "", "", fmt.Errorf("no route found")
 
-	// Use DNS if enabled
+	// Use DNS if enabled and no static route found
 	if r.useDNS {
 		r.logger.Debug("No static route found for %s, attempting DNS resolution", serverName)
 		// Try to resolve as hostname:port
@@ -148,11 +201,17 @@ func (r *Router) ResolveDestination(serverName string, path string) (string, str
 
 // AddStaticRoute adds a static route mapping with optional path prefixes and TLS preservation
 func (r *Router) AddStaticRoute(src, dest string) {
-	// Parse source and destination for paths
-	srcParts := strings.SplitN(src, "/", 2)
-	destParts := strings.SplitN(dest, "/", 2)
+	r.logger.Debug("Adding static route - src: %s, dest: %s", src, dest)
 
-	// Check if destination should preserve TLS verification
+	// Parse source and handle paths
+	srcParts := strings.Split(src, "/")
+	srcHost := srcParts[0]
+	var srcPath string
+	if len(srcParts) > 1 {
+		srcPath = "/" + strings.Join(srcParts[1:], "/")
+	}
+
+	// Check if destination should preserve TLS verification and extract the actual destination
 	preserveTLS := false
 	destination := dest
 	if strings.HasPrefix(dest, "tls://") {
@@ -160,28 +219,37 @@ func (r *Router) AddStaticRoute(src, dest string) {
 		destination = strings.TrimPrefix(dest, "tls://")
 	}
 
-	// Parse destination for paths after handling tls:// prefix
-	destParts = strings.SplitN(destination, "/", 2)
-	destination = destParts[0]
+	// Parse destination and handle paths
+	destParts := strings.Split(destination, "/")
+	destHost := destParts[0]
+	var destPath string
+	if len(destParts) > 1 {
+		destPath = "/" + strings.Join(destParts[1:], "/")
+	}
+
+	// Log the parsing steps for debugging
+	r.logger.Debug("Parsing route - src: %s (host: %s, path: %s), dest: %s (host: %s, path: %s)", 
+		src, srcHost, srcPath, dest, destHost, destPath)
 
 	// Create the route with path information
 	route := &Route{
-		Source:      srcParts[0],
-		Destination: destination,
+		Source:      srcHost,
+		Destination: destHost,
+		SourcePath:  srcPath,
+		DestPath:    destPath,
 		PreserveTLS: preserveTLS,
 	}
 
-	// Add path prefixes if present
-	if len(srcParts) > 1 {
-		route.SourcePath = "/" + srcParts[1]
+	// Store the route
+	if _, exists := r.routes[srcHost]; !exists {
+		r.routes[srcHost] = make([]*Route, 0)
 	}
-	if len(destParts) > 1 {
-		route.DestPath = "/" + destParts[1]
-	}
+	r.routes[srcHost] = append(r.routes[srcHost], route)
 
-	// Store both the simple mapping and the full route
-	r.staticRoutes[srcParts[0]] = destParts[0]
-	r.routes[srcParts[0]] = route
+	// Store the static route if there's no path
+	if srcPath == "" {
+		r.staticRoutes[srcHost] = destHost
+	}
 
 	r.logger.Info("Added static route %s -> %s with paths %s -> %s", 
 		route.Source, route.Destination, route.SourcePath, route.DestPath)

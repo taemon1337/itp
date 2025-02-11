@@ -1,0 +1,47 @@
+---
+# ServiceAccount for the proxy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: itp-proxy
+  namespace: default  # Change this to your desired namespace
+---
+# ClusterRole with permissions to manage certificates and secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: itp-proxy-role
+rules:
+  # Permissions for cert-manager Certificate resources
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Permissions for Kubernetes Secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Optional: Permissions to read cert-manager Issuers/ClusterIssuers
+  - apiGroups: ["cert-manager.io"]
+    resources: ["issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch"]
+  
+  # Optional: Permissions to read cert-manager events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding to bind the ServiceAccount to the ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: itp-proxy-binding
+subjects:
+- kind: ServiceAccount
+  name: itp-proxy
+  namespace: default  # Must match the ServiceAccount namespace
+roleRef:
+  kind: ClusterRole
+  name: itp-proxy-role
+  apiGroup: rbac.authorization.k8s.io

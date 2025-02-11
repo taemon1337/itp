@@ -46,6 +46,7 @@ type Identity struct {
 	Groups           []string
 	Roles            []string
 	Auths            []string
+	Issuer           string // The issuer's distinguished name
 }
 
 // Translator handles identity translation between certificate domains
@@ -208,12 +209,35 @@ func (t *Translator) TranslateIdentity(cert *x509.Certificate) (*Identity, error
 	// Add any auth mappings
 	identity.Auths = t.getAuthMappings(cert)
 
+	// Set the issuer distinguished name
+	var issuerParts []string
+	if cert.Issuer.CommonName != "" {
+		issuerParts = append(issuerParts, fmt.Sprintf("CN=%s", cert.Issuer.CommonName))
+	}
+	for _, org := range cert.Issuer.Organization {
+		issuerParts = append(issuerParts, fmt.Sprintf("O=%s", org))
+	}
+	for _, ou := range cert.Issuer.OrganizationalUnit {
+		issuerParts = append(issuerParts, fmt.Sprintf("OU=%s", ou))
+	}
+	for _, c := range cert.Issuer.Country {
+		issuerParts = append(issuerParts, fmt.Sprintf("C=%s", c))
+	}
+	for _, st := range cert.Issuer.Province {
+		issuerParts = append(issuerParts, fmt.Sprintf("ST=%s", st))
+	}
+	for _, l := range cert.Issuer.Locality {
+		issuerParts = append(issuerParts, fmt.Sprintf("L=%s", l))
+	}
+	identity.Issuer = strings.Join(issuerParts, ",")
+
 	t.logger.Debug("Identity translation details:")
 	if source != "" {
 		t.logger.Debug("Found mapping from %s", source)
 	} else {
 		t.logger.Debug("Using auto-mapped identity")
 	}
+	t.logger.Debug("Issuer DN: %s", identity.Issuer)
 	return identity, nil
 }
 
