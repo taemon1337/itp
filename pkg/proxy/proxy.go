@@ -955,59 +955,15 @@ func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, externalN
 		},
 	}
 
-	// Extract hostname/IP from destination if it's a host:port combination
-	host := destination
-	if h, _, err := net.SplitHostPort(destination); err == nil {
-		host = h
-	}
-
-	// For connections to IP addresses, we need special handling
-	ip := net.ParseIP(host)
-	if ip != nil {
-		// When connecting to an IP, especially for the echo server:
-		// 1. Enable InsecureSkipVerify since the IP won't match the cert
-		// 2. But manually verify in VerifyPeerCertificate that the cert is valid for echo.cluster.local
-		tlsConfig.InsecureSkipVerify = true
-		originalVerify := tlsConfig.VerifyPeerCertificate
-		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			// First run the original verification if it exists
-			if originalVerify != nil {
-				if err := originalVerify(rawCerts, verifiedChains); err != nil {
-					return err
-				}
-			}
-
-			// Then verify the certificate is valid for echo.cluster.local
-			if len(rawCerts) == 0 {
-				return fmt.Errorf("no certificates presented")
-			}
-
-			cert, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return fmt.Errorf("failed to parse certificate: %v", err)
-			}
-
-			// For echo server, verify it's valid for echo.cluster.local or *.cluster.local
-			if strings.HasPrefix(externalName, p.config.EchoName) {
-				for _, name := range cert.DNSNames {
-					if name == "echo.cluster.local" || name == "*.cluster.local" {
-						p.proxyLogger.Debug("Certificate is valid for %s", name)
-						return nil
-					}
-				}
-				return fmt.Errorf("certificate is not valid for echo.cluster.local or *.cluster.local")
-			}
-
-			// For other services, verify against the internal name
-			if err := cert.VerifyHostname(internalName); err != nil {
-				return fmt.Errorf("certificate is not valid for %s: %v", internalName, err)
-			}
-
-			return nil
+	// Check if we should preserve the original destination hostname for TLS verification
+	if route, ok := p.router.GetRoute(externalName); ok && route.PreserveTLS {
+		// Extract hostname from destination if it's a host:port combination
+		host := destination
+		if h, _, err := net.SplitHostPort(destination); err == nil {
+			host = h
 		}
-		p.proxyLogger.Debug("Using custom certificate verification for IP address %s", host)
-	} else if route, ok := p.router.GetRoute(externalName); ok && route.PreserveTLS {
-		// When preserving TLS for named hosts:
+
+		// When preserving TLS:
 		// 1. Set ServerName to the external hostname for proper certificate validation
 		// 2. Skip internal CA verification since we're connecting to an external service
 		tlsConfig.ServerName = host
