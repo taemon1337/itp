@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"time"
 	"crypto/x509"
 	"fmt"
 	"io"
@@ -13,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/itp/pkg/certstore"
 	"github.com/itp/pkg/echo"
@@ -740,11 +740,14 @@ func (p *Proxy) handleTCPConnection(tlsConn *tls.Conn, destination string, ident
 
 // ListenAndServe starts the TLS proxy server
 func (p *Proxy) ListenAndServe(config *Config) error {
-	// Start echo server if enabled
-	if config.EchoName != "" {
+	// Start echo server if enabled (requires a non-empty name and address)
+	if config.EchoName != "" && config.EchoAddr != "" {
+		p.proxyLogger.Info("Setting up echo server with name '%s' on '%s'", config.EchoName, config.EchoAddr)
 		if err := p.setupEchoServer(config); err != nil {
 			return fmt.Errorf("failed to setup echo server: %v", err)
 		}
+	} else if config.EchoName != "" && config.EchoAddr == "" {
+		p.proxyLogger.Warn("Echo server name provided but no address specified - echo server will not be started")
 	}
 
 	// Create server TLS config
@@ -777,6 +780,13 @@ func (p *Proxy) setupEchoServer(config *Config) error {
 	if !strings.HasSuffix(config.EchoName, config.InternalDomain) {
 		p.proxyLogger.Info("echo name does not have internal domain, adding: %s.%s", config.EchoName, config.InternalDomain)
 		config.EchoName = fmt.Sprintf("%s.%s", config.EchoName, config.InternalDomain)
+	}
+
+	// Set up echo store config if not provided
+	if config.EchoStoreConfig == nil {
+		config.EchoStoreConfig = &certstore.StoreOptions{
+			DefaultTTL: 24 * time.Hour, // Default 24 hour TTL
+		}
 	}
 
 	// Use provided echo cert options or create default ones
@@ -817,7 +827,12 @@ func (p *Proxy) setupEchoServer(config *Config) error {
 	}()
 
 	// Add static routes for echo server
-	localAddr := fmt.Sprintf("127.0.0.1%s", config.EchoAddr)
+	// Use just the port from EchoAddr
+	portStr := config.EchoAddr
+	if strings.HasPrefix(portStr, ":") {
+		portStr = portStr[1:]
+	}
+	localAddr := fmt.Sprintf("127.0.0.1:%s", portStr)
 	p.router.AddStaticRoute("echo", localAddr)
 	p.router.AddStaticRoute(config.EchoName, localAddr)
 	p.proxyLogger.Info("Echo server started on %s with name '%s' and alias 'echo'", config.EchoAddr, config.EchoName)
@@ -927,8 +942,6 @@ func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, externalN
 		RootCAs: caPool,
 		// Present our client cert to the upstream
 		Certificates: []tls.Certificate{*upstreamCert},
-		// By default use the internal name and verify against our CA
-		ServerName: internalName,
 		InsecureSkipVerify: false,
 		// Add verification callback to log certificate details
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -953,6 +966,17 @@ func (p *Proxy) createUpstreamTLSConfig(upstreamCert *tls.Certificate, externalN
 			}
 			return nil
 		},
+	}
+
+	// Extract hostname from destination if it's a host:port combination
+	host := destination
+	if h, _, err := net.SplitHostPort(destination); err == nil {
+		host = h
+	}
+
+	// Only set ServerName if not connecting to localhost
+	if host != "127.0.0.1" && host != "localhost" {
+		tlsConfig.ServerName = internalName
 	}
 
 	// Check if we should preserve the original destination hostname for TLS verification

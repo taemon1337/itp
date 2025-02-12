@@ -89,7 +89,81 @@ make docker-build  # Build both Docker variants
 
 ## Quick Start
 
-Start the proxy with automatic certificate generation:
+### Using YAML Configuration (Recommended)
+
+ITP supports comprehensive configuration through YAML files. This is the recommended way to configure the proxy as it provides better organization and maintainability:
+
+```bash
+itp --config config.yaml
+```
+
+Example `config.yaml`:
+```yaml
+server:
+  name: proxy.example.com
+  external_domain: external.com
+  internal_domain: cluster.local
+  listen: :8443
+  echo:
+    name: echo.cluster.local
+    addr: :8444
+
+certificates:
+  cert_file: /path/to/cert.pem
+  key_file: /path/to/key.pem
+  ca_file: /path/to/ca.pem
+  k8s_cert_manager:
+    enabled: false
+    namespace: default
+    issuer:
+      name: default-issuer
+      kind: ClusterIssuer
+      group: cert-manager.io
+
+security:
+  allow_unknown_certs: false
+  route_via_dns: true
+  auto_map_cn: true
+
+routes:
+  - source: app.external.com
+    destination: app.cluster.local
+  - source: api.external.com
+    destination: api.cluster.local:8080
+
+templates:
+  files:
+    - name: user-info
+      path: /path/to/user.tmpl
+  inline:
+    - name: role-info
+      template: "Role:{{.Role}}"
+
+headers:
+  inject_upstream: true
+  inject_downstream: false
+  templates:
+    - upstream: app.cluster.local
+      header: X-User-Info
+      template: "{{template \"user-info\"}}"
+
+mappings:
+  roles:
+    - cn: admin
+      value: admin-user
+      roles: [admin, superuser]
+  auth:
+    - cn: "*"
+      value: "*"
+      auth: [read, write]
+```
+
+See [examples/config.yaml](examples/config.yaml) for a complete example with comments.
+
+### Using Command Line Flags
+
+Alternatively, you can configure the proxy using command line flags:
+
 ```bash
 itp --server-name proxy.example.com \
     --server-san "proxy.internal,proxy.dev" \
